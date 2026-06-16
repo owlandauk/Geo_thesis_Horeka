@@ -134,6 +134,6 @@ if __name__ == "__main__":
     parser.add_argument("--gps_csv",    default=YFCC4K_GPS_CSV)
     parser.add_argument("--limit",      type=int, default=None, help="max images to evaluate")
     parser.add_argument("--start",      type=int, default=0,    help="start from this dataset index (for resuming)")
-    parser.add_argument("--batch_size", type=int, default=4,    help="images per GPU batch")
+    parser.add_argument("--batch_size", type=int, default=20,   help="images per GPU batch")
     parser.add_argument("--out",        default="results/eval.json")
     evaluate(parser.parse_args())

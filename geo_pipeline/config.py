@@ -35,4 +35,4 @@ EVAL_THRESHOLDS = [1, 25, 200, 750, 2500]
 MAX_NEW_TOKENS  = 512
 
 # ── Batch inference ────────────────────────────────────────────────────────────
-MAX_SL_BATCH_SIZE = 6    # max hypotheses per batch in SLModule; reduce if OOM
+MAX_SL_BATCH_SIZE = 20   # max hypotheses per batch in SLModule; reduce if OOM

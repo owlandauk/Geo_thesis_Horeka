@@ -97,7 +97,7 @@ def _verify_prompt(image: Image.Image, task: dict, hypotheses: list[str], level:
 
 # ── Main pipeline class ────────────────────────────────────────────────────────
 
-BATCH_SIZE = 4  # number of images to process in parallel; reduce if OOM
+BATCH_SIZE = 20  # number of images to process in parallel; reduce if OOM
 
 
 class GeoPipeline:
