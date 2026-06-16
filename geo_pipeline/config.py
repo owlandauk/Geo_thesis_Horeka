@@ -32,7 +32,10 @@ POMDP_GAMMA     = 0.95   # discount factor (used if computing cumulative reward)
 EVAL_THRESHOLDS = [1, 25, 200, 750, 2500]
 
 # ── Generation ────────────────────────────────────────────────────────────────
-MAX_NEW_TOKENS  = 512
+MAX_NEW_TOKENS         = 384    # default cap (used by hypothesize)
+SL_MAX_NEW_TOKENS      = 48     # SL responses are tiny: "Rating: X / Confidence: Y / one sentence"
+VERIFY_MAX_NEW_TOKENS  = 160    # verify observation: a paragraph is plenty
+POMDP_MAX_NEW_TOKENS   = 64     # policy returns {"task_index": N, "reason": "..."}
 
 # ── Batch inference ────────────────────────────────────────────────────────────
 MAX_SL_BATCH_SIZE = 8    # original prompts per SL batch; multiplied by SL_N_SAMPLES → actual GPU batch. Reduce if OOM.

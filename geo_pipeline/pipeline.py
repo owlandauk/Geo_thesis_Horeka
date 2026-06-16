@@ -21,7 +21,10 @@ from models.mllm_client import MLLMClient
 from modules.sl import SLModule
 from modules.dst import DSTModule
 from modules.pomdp import POMDPModule
-from config import PRIOR_TEMP, PRIOR_CUTOFF, TRANSITION_THR
+from config import (
+    PRIOR_TEMP, PRIOR_CUTOFF, TRANSITION_THR,
+    VERIFY_MAX_NEW_TOKENS, POMDP_MAX_NEW_TOKENS,
+)
 
 LEVELS = ["country", "city", "street"]
 
@@ -152,7 +155,7 @@ class GeoPipeline:
             # Verify: get evidence description from MLLM
             hyps = list(posterior.keys())
             v_messages = _verify_prompt(image, task, hyps, level)
-            evidence_desc = self.mllm.generate(v_messages, max_new_tokens=256)
+            evidence_desc = self.mllm.generate(v_messages, max_new_tokens=VERIFY_MAX_NEW_TOKENS)
 
             # SL: uncertainty-aware per-hypothesis scores
             w_scores = self.sl.score(evidence_desc, hyps, level)
@@ -275,7 +278,7 @@ class GeoPipeline:
                         policy_idx.append(i)
 
                 if policy_msgs:
-                    policy_resps = self.mllm.batch_generate(policy_msgs, max_new_tokens=128)
+                    policy_resps = self.mllm.batch_generate(policy_msgs, max_new_tokens=POMDP_MAX_NEW_TOKENS)
                     for i, resp in zip(policy_idx, policy_resps):
                         match = __import__("re").search(r'"?task_index"?\s*:\s*(\d+)', resp)
                         idx = int(match.group(1)) if match else 0
@@ -288,7 +291,7 @@ class GeoPipeline:
                     _verify_prompt(images[i], tasks[i], list(posteriors[i].keys()), level)
                     for i in active
                 ]
-                verify_resps = self.mllm.batch_generate(verify_msgs, max_new_tokens=256)
+                verify_resps = self.mllm.batch_generate(verify_msgs, max_new_tokens=VERIFY_MAX_NEW_TOKENS)
                 evidence_descs = {i: resp for i, resp in zip(active, verify_resps)}
 
                 # ── SL scoring: ONE big batch across all active images ──────────

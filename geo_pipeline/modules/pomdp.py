@@ -20,7 +20,7 @@ For offline / no-search setting (CVHCI servers, no internet):
 import json
 import re
 from models.mllm_client import MLLMClient
-from config import POMDP_MAX_STEPS
+from config import POMDP_MAX_STEPS, POMDP_MAX_NEW_TOKENS
 
 
 _CHOICE_RE = re.compile(r'"?task_index"?\s*:\s*(\d+)', re.IGNORECASE)
@@ -83,7 +83,7 @@ class POMDPModule:
             return 0
 
         messages = self._make_policy_prompt(posterior, pending_tasks, level, step)
-        response = self.mllm.generate(messages, max_new_tokens=128)
+        response = self.mllm.generate(messages, max_new_tokens=POMDP_MAX_NEW_TOKENS)
 
         match = _CHOICE_RE.search(response)
         if match:

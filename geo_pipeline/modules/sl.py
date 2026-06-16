@@ -17,7 +17,7 @@ import re
 import math
 import numpy as np
 from models.mllm_client import MLLMClient
-from config import SL_N_SAMPLES, BETA
+from config import SL_N_SAMPLES, BETA, SL_MAX_NEW_TOKENS
 
 
 _SCORE_RE = re.compile(
@@ -87,7 +87,9 @@ class SLModule:
         all_responses: list[list[str]] = []
         for i in range(0, len(messages_list), MAX_SL_BATCH_SIZE):
             batch = messages_list[i:i + MAX_SL_BATCH_SIZE]
-            all_responses.extend(self.mllm.batch_sample_n(batch, n=self.n_samples))
+            all_responses.extend(
+                self.mllm.batch_sample_n(batch, n=self.n_samples, max_new_tokens=SL_MAX_NEW_TOKENS)
+            )
 
         scores = {}
         for hyp, responses in zip(hypotheses, all_responses):
@@ -135,7 +137,9 @@ class SLModule:
         flat_responses: list[list[str]] = []
         for i in range(0, len(flat_msgs), MAX_SL_BATCH_SIZE):
             batch = flat_msgs[i:i + MAX_SL_BATCH_SIZE]
-            flat_responses.extend(self.mllm.batch_sample_n(batch, n=self.n_samples))
+            flat_responses.extend(
+                self.mllm.batch_sample_n(batch, n=self.n_samples, max_new_tokens=SL_MAX_NEW_TOKENS)
+            )
 
         results: list[dict[str, float]] = [dict() for _ in items]
         for (item_idx, hyp), responses in zip(owners, flat_responses):
