@@ -54,9 +54,15 @@ def _softmax_prior(scores: dict[str, float]) -> dict[str, float]:
 
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
     level_hint = {
-        "country": "Identify the most likely countries and generate a plan to verify.",
-        "city":    "Identify the most likely cities and generate a plan to verify.",
-        "street":  "Identify the most likely streets/districts and generate a plan to verify.",
+        "country": (
+            "List 8 to 12 candidate countries spanning DIFFERENT continents — "
+            "include at least one candidate each from Asia, Europe, Africa, "
+            "North America, South America, and Oceania, even if their initial "
+            "confidence is low. Do NOT restrict to a single region. "
+            "Then generate a plan to verify which one is correct."
+        ),
+        "city":   "Identify 5 to 8 most likely cities and generate a plan to verify.",
+        "street": "Identify the most likely streets/districts and generate a plan to verify.",
     }[level]
     return [
         {
@@ -198,10 +204,6 @@ class GeoPipeline:
             result[level] = best
             result[f"{level}_posterior"] = posterior
 
-            # stop early if confidence is very low (model has no signal)
-            if posterior.get(best, 0) < 0.3 and level == "country":
-                break
-
         result["posterior"] = posterior
         return result
 
@@ -318,12 +320,6 @@ class GeoPipeline:
                 best = max(posteriors[i], key=posteriors[i].get)
                 results[i][level] = best
                 results[i][f"{level}_posterior"] = posteriors[i]
-
-                if posteriors[i].get(best, 0) < 0.3 and level == "country":
-                    # no signal at country level — skip finer levels for this image
-                    for remaining in LEVELS[LEVELS.index(level) + 1:]:
-                        results[i][remaining] = "Unknown"
-                        results[i][f"{remaining}_posterior"] = {}
 
             results_i_posterior = posteriors  # noqa: F841 — kept for debuggability
 
