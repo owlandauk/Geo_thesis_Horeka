@@ -53,7 +53,7 @@ probe_all_idle() {
         fi
         report+="  GPU $g: free=${free}MB util=${util}%  [$ok]\n"
     done
-    printf "$report"
+    printf '%b' "$report"
     return $((1 - all_ok))   # 0 = success when all_ok=1
 }
 

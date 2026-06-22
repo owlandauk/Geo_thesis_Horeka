@@ -545,7 +545,13 @@ class GeoPipeline:
                 result["city"] = "Unknown"
                 result["city_posterior"] = {}
 
-        result["posterior"] = posterior
+        # Set top-level posterior to the deepest non-Unknown level (mirrors
+        # predict_batch). Falls back to country if everything below is Unknown.
+        final_level = next(
+            (lv for lv in reversed(LEVELS) if result.get(lv, "Unknown") != "Unknown"),
+            LEVELS[0],
+        )
+        result["posterior"] = result.get(f"{final_level}_posterior", {})
         return result
 
     def predict_batch(self, images: list) -> list[dict]:
@@ -574,64 +580,76 @@ class GeoPipeline:
 
         for level in LEVELS:
             # Locatability gate: skip street-level for low-locatability images.
+            # `active_imgs_idx` is the set of images we ACTUALLY process this level.
+            # Skipped images get level="Unknown" and a copy of the previous level's
+            # posterior (so geocode falls back to country-level location).
             if level == "street":
                 active_imgs_idx = [
                     i for i in range(n)
                     if not (pre_list[i] and pre_list[i].get("locatability") == "low")
                 ]
+                skipped = [i for i in range(n) if i not in active_imgs_idx]
+                for i in skipped:
+                    results[i][level] = "Unknown"
+                    results[i][f"{level}_posterior"] = {}
             else:
                 active_imgs_idx = list(range(n))
+                skipped = []
 
-            # ── Hypothesize: one batch call for all images ──────────────────────
+            # ── Hypothesize: one batch call for ACTIVE images only ──────────────
             hyp_messages = [
                 _hypothesize_prompt(images[i], level, contexts[i], pre=pre_list[i])
-                for i in range(n)
+                for i in active_imgs_idx
             ]
-            hyp_responses = self.mllm.batch_generate(hyp_messages)
+            hyp_responses = self.mllm.batch_generate(hyp_messages) if hyp_messages else []
 
-            priors = []
-            plans  = []
-            for resp in hyp_responses:
+            # priors/plans keyed by image index (not by active position)
+            priors: dict[int, dict] = {}
+            plans:  dict[int, list] = {}
+            for i, resp in zip(active_imgs_idx, hyp_responses):
                 parsed = _try_parse_json(resp)
                 if parsed is None or "hypotheses" not in parsed:
-                    priors.append({"Unknown": 1.0})
-                    plans.append([])
+                    priors[i] = {"Unknown": 1.0}
+                    plans[i]  = []
                 else:
                     raw_scores = {h["location"]: h.get("confidence", 0.5)
                                   for h in parsed["hypotheses"]}
-                    priors.append(_softmax_prior(raw_scores))
-                    plans.append(parsed.get("verification_plan", []))
+                    priors[i] = _softmax_prior(raw_scores)
+                    plans[i]  = parsed.get("verification_plan", [])
 
             # ── Country-level: add GeoReasoner freeform second prompt as a ──────
             # complementary signal, then apply pre-analysis hemisphere/continent
             # bias. Three signals (structured 5-cue + freeform + pre-analysis)
             # produce the country prior.
-            if level == "country":
-                reasoner_msgs = [_geo_reasoner_prompt(images[i]) for i in range(n)]
+            if level == "country" and active_imgs_idx:
+                reasoner_msgs = [_geo_reasoner_prompt(images[i]) for i in active_imgs_idx]
                 reasoner_resps = self.mllm.batch_generate(reasoner_msgs)
-                for i, resp in enumerate(reasoner_resps):
+                for i, resp in zip(active_imgs_idx, reasoner_resps):
                     parsed = _try_parse_json(resp)
                     rc = parsed.get("country") if parsed else None
                     if rc and "Unknown" not in priors[i]:
                         priors[i] = _merge_geo_reasoner_seed(priors[i], rc)
-                    priors[i] = _apply_pre_analysis_bias(priors[i], pre_list[i])
+                    # Apply pre-analysis bias only to non-degenerate priors
+                    # ({"Unknown":1.0} has nothing to bias).
+                    if "Unknown" not in priors[i]:
+                        priors[i] = _apply_pre_analysis_bias(priors[i], pre_list[i])
 
-            # seed context from parent level
+            # seed context from parent level (only for images we'll process)
             if level != "country":
                 parent_level = LEVELS[LEVELS.index(level) - 1]
-                for i in range(n):
+                for i in active_imgs_idx:
                     parent = results[i].get(parent_level, "")
                     clues  = "; ".join(key_evidence[i][-3:])
                     contexts[i] = f"Located in {parent}. Key clues: {clues}" if parent else ""
 
-            # ── POMDP loop across all images simultaneously ─────────────────────
-            posteriors    = [dict(p) for p in priors]
-            pending       = [list(pl) for pl in plans]
-            steps         = [0] * n
-            ev_scores_all = [[] for _ in range(n)]
+            # ── POMDP loop across all active images simultaneously ──────────────
+            posteriors: dict[int, dict]    = {i: dict(priors[i]) for i in active_imgs_idx}
+            pending:    dict[int, list]    = {i: list(plans[i])  for i in active_imgs_idx}
+            steps:      dict[int, int]     = {i: 0               for i in active_imgs_idx}
+            ev_scores_all: dict[int, list] = {i: []              for i in active_imgs_idx}
 
             while True:
-                # find images still running. Honor locatability gate at street.
+                # find images still running among ACTIVE ones.
                 active = [
                     i for i in active_imgs_idx
                     if not self.pomdp.should_stop(
@@ -692,9 +710,9 @@ class GeoPipeline:
 
                     steps[i] += 1
 
-            # ── Collect level results ───────────────────────────────────────────
-            for i in range(n):
-                best = max(posteriors[i], key=posteriors[i].get)
+            # ── Collect level results (only for active images) ──────────────────
+            for i in active_imgs_idx:
+                best = max(posteriors[i], key=posteriors[i].get) if posteriors[i] else "Unknown"
                 results[i][level] = best
                 results[i][f"{level}_posterior"] = posteriors[i]
 
@@ -721,8 +739,6 @@ class GeoPipeline:
                         if fc and fc.get("consistent") is False:
                             results[i]["city"] = "Unknown"
                             results[i]["city_posterior"] = {}
-
-            results_i_posterior = posteriors  # noqa: F841 — kept for debuggability
 
         for i in range(n):
             final_level = next(
