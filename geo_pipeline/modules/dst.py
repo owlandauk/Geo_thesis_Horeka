@@ -1,71 +1,124 @@
 """
-DST — Multi-source Evidence Fusion via Dempster-Shafer Theory
+Posterior update module.
 
-GeoBayes fuses evidence with a naive product ∏W(e_t|l), which assumes
-conditional independence and breaks down when two clues conflict strongly.
+GeoBayes (AAAI-26, Eq.7) updates the posterior via simple multiplicative
+Bayesian update:
 
-This module replaces that product with DST combination:
-  - Each evidence item defines a Basic Belief Assignment (BBA) over the
-    hypothesis set Θ = {l_1, ..., l_k, Θ} (the last element is the "ignorance" mass).
-  - Multiple BBAs are combined with Dempster's rule (with conflict normalization).
-  - When global conflict K > DST_CONFLICT_THR, we fall back to the cautious
-    (Yager's) rule that routes conflict mass to ignorance rather than renormalizing.
+    P(L=l | E_{1:t}) ∝ P_0(l) · ∏_t W(e_t | L=l)
 
-Output: posterior probability distribution over hypotheses.
+where W(e_t | L=l) = exp[α_t · β · (c_t − 3)] is a centered support weight
+(β = ln 2). The centering at 3 is critical — it lets contradictory evidence
+(c_t < 3) cancel positive priors instead of always reinforcing.
+
+This module previously implemented Dempster-Shafer fusion. The DST formulation
+loses information because it L1-normalizes the W scores into BBA mass before
+combination, throwing away the magnitude that distinguishes (W=1.87 vs W=0.54)
+from (W=1.05 vs W=0.95). We restore GeoBayes's faithful multiplicative update
+as the primary path, and keep DST Yager-cautious combination as an optional
+fallback for high-conflict regimes (multiple very strong but contradictory
+clues), gated by the conflict mass K.
 """
 
 from __future__ import annotations
+import math
 import numpy as np
 from config import DST_CONFLICT_THR
 
 
-def _normalize_bba(bba: dict) -> dict:
-    total = sum(bba.values())
-    return {k: v / total for k, v in bba.items()} if total > 0 else bba
+def _renormalize(d: dict[str, float]) -> dict[str, float]:
+    total = sum(d.values())
+    if total <= 0:
+        n = max(len(d), 1)
+        return {k: 1.0 / n for k in d}
+    return {k: v / total for k, v in d.items()}
 
 
-def likelihood_to_bba(
-    w_scores: dict[str, float],
-    theta_key: str = "__ignorance__",
-    base_ignorance: float = 0.1,
-) -> dict[str, float]:
+def _bayesian_update(prior: dict[str, float],
+                     evidence_scores: list[dict[str, float]]) -> dict[str, float]:
+    """GeoBayes Eq.7: P_t(l) ∝ P_0(l) · ∏ W(e_t | l).
+
+    W is already exponential ( = exp[α·β·(c−3)] ), so log-sum then exp keeps
+    numerics stable when many evidence items multiply.
     """
-    Convert W_sl scores into a BBA.
-    W > 1 → supporting evidence  → high focal mass on that hypothesis
-    W < 1 → contradicting evidence → mass shifted away
-    W = 1 → neutral              → mass goes to ignorance
+    if not evidence_scores:
+        return dict(prior)
 
-    Strategy: softmax over W scores → hypothesis masses, then mix with a
-    fixed ignorance mass to model MLLM uncertainty.
+    hyps = list(prior.keys())
+    log_posterior = {h: math.log(max(prior[h], 1e-12)) for h in hyps}
+
+    for w_scores in evidence_scores:
+        for h in hyps:
+            w = w_scores.get(h, 1.0)
+            log_posterior[h] += math.log(max(w, 1e-12))
+
+    # softmax over log-posterior for numerical stability
+    m = max(log_posterior.values())
+    exps = {h: math.exp(lp - m) for h, lp in log_posterior.items()}
+    return _renormalize(exps)
+
+
+def _evidence_conflict(evidence_scores: list[dict[str, float]]) -> float:
+    """Measure pairwise conflict across evidence items.
+
+    Returns a value in [0, 1]: 0 = all evidence points to the same hypothesis,
+    1 = every pair of evidence items points to a completely different hypothesis.
+
+    Used as a gating signal: if conflict is very high, the multiplicative
+    update can collapse to a wrong winner; we then fall back to Yager-cautious
+    DST so conflicting mass goes to ignorance instead.
     """
+    if len(evidence_scores) < 2:
+        return 0.0
+
+    # for each evidence, the hypothesis it most supports
+    top_hyps = []
+    for ws in evidence_scores:
+        if not ws:
+            continue
+        top = max(ws.items(), key=lambda kv: kv[1])
+        if top[1] > 1.0:  # only count items that genuinely support something
+            top_hyps.append(top[0])
+
+    if len(top_hyps) < 2:
+        return 0.0
+
+    from collections import Counter
+    counts = Counter(top_hyps)
+    most_common_count = counts.most_common(1)[0][1]
+    # fraction of evidence items NOT pointing to the modal hypothesis
+    return 1.0 - most_common_count / len(top_hyps)
+
+
+# ── Yager DST fallback (only invoked under heavy conflict) ─────────────────────
+
+def _likelihood_to_bba(w_scores: dict[str, float],
+                       base_ignorance: float = 0.15) -> dict[str, float]:
+    """Map W scores to a BBA. Unlike the previous version, we preserve W's
+    magnitude by using softmax-on-log(W) so a strong likelihood ratio stays
+    informative."""
+    theta = "__ignorance__"
     hyps = list(w_scores.keys())
-    ws   = np.array([w_scores[h] for h in hyps], dtype=float)
+    if not hyps:
+        return {theta: 1.0}
 
-    # W scores are already exp-scaled likelihoods — L1-normalise directly.
-    # A second softmax would compress Country/Continent-level gaps where W
-    # values are close (e.g. 1.3 vs 1.1), making the posterior nearly uniform.
-    ws_clipped = np.clip(ws, 1e-9, None)
-    probs = ws_clipped / ws_clipped.sum()
+    log_ws = np.array([math.log(max(w_scores[h], 1e-12)) for h in hyps])
+    log_ws -= log_ws.max()
+    exps = np.exp(log_ws)
+    probs = exps / exps.sum()
 
     bba = {h: float(p) * (1.0 - base_ignorance) for h, p in zip(hyps, probs)}
-    bba[theta_key] = base_ignorance
+    bba[theta] = base_ignorance
     return bba
 
 
-def dempster_combine(bba1: dict, bba2: dict, cautious_threshold: float = DST_CONFLICT_THR) -> dict:
-    """
-    Combine two BBAs using Dempster's rule.
-    Falls back to Yager's cautious rule if conflict K > cautious_threshold.
-    Both BBAs must share the same hypothesis keys + __ignorance__ key.
-    """
+def _yager_combine(bba1: dict, bba2: dict) -> dict:
+    """Yager's cautious rule: conflict mass goes to ignorance (no renormalization).
+    Used as fallback when multiplicative update would collapse under high conflict."""
     theta = "__ignorance__"
-    hyps  = [k for k in bba1 if k != theta]
-
+    hyps = [k for k in bba1 if k != theta]
     combined: dict[str, float] = {h: 0.0 for h in hyps}
     combined[theta] = 0.0
-    K = 0.0  # conflict mass
-
-    all_keys = hyps + [theta]  # noqa: F841
+    K = 0.0
 
     for k1, m1 in bba1.items():
         for k2, m2 in bba2.items():
@@ -77,57 +130,45 @@ def dempster_combine(bba1: dict, bba2: dict, cautious_threshold: float = DST_CON
             elif k2 == theta:
                 combined[k1] = combined.get(k1, 0.0) + product
             else:
-                # conflict: two different singleton hypotheses
                 K += product
 
-    if K > cautious_threshold:
-        # Yager: redirect conflict to ignorance
-        combined[theta] = combined.get(theta, 0.0) + K
-    elif K < 1.0:
-        # standard Dempster normalization
-        factor = 1.0 / (1.0 - K)
-        combined = {k: v * factor for k, v in combined.items()}
-    # K == 1.0 is total conflict — return uniform
-    else:
-        n = len(hyps)
-        combined = {h: 1.0 / n for h in hyps}
-        combined[theta] = 0.0
+    combined[theta] = combined.get(theta, 0.0) + K
+    return _renormalize(combined)
 
-    return _normalize_bba(combined)
 
+def _dst_fallback(prior: dict[str, float],
+                  evidence_scores: list[dict[str, float]]) -> dict[str, float]:
+    """Yager-cautious DST combination — robust to high-conflict evidence streams."""
+    theta = "__ignorance__"
+    hyps = list(prior.keys())
+    bba = {h: prior[h] * 0.85 for h in hyps}
+    bba[theta] = 0.15
+    for ws in evidence_scores:
+        bba = _yager_combine(bba, _likelihood_to_bba(ws))
+    posterior = {h: bba.get(h, 0.0) for h in hyps}
+    return _renormalize(posterior)
+
+
+# ── Public module ──────────────────────────────────────────────────────────────
 
 class DSTModule:
     """
-    Fuses a list of per-evidence W_sl score dicts into a posterior distribution.
-    Replaces GeoBayes's naive ∏W product.
+    Posterior update. Primary path: GeoBayes Eq.7 multiplicative Bayesian update.
+    Fallback (when evidence is highly inconsistent): Yager DST combination so
+    conflict mass routes to ignorance instead of producing a confident wrong answer.
     """
 
-    def fuse(
-        self,
-        prior: dict[str, float],
-        evidence_scores: list[dict[str, float]],
-    ) -> dict[str, float]:
-        """
-        Args:
-            prior:           {hypothesis: probability} from SL / GeoBayes prior step
-            evidence_scores: list of {hypothesis: W_sl} dicts, one per evidence item
+    def fuse(self,
+             prior: dict[str, float],
+             evidence_scores: list[dict[str, float]]) -> dict[str, float]:
+        if not prior:
+            return {}
+        # always run the Bayesian update; it is the GeoBayes-faithful path
+        bayes_post = _bayesian_update(prior, evidence_scores)
 
-        Returns:
-            posterior:       {hypothesis: probability} (ignorance key removed)
-        """
-        # initialise BBA from prior (prior already sums to 1, add small ignorance)
-        theta = "__ignorance__"
-        hyps  = list(prior.keys())
-        bba   = {h: prior[h] * 0.9 for h in hyps}
-        bba[theta] = 0.1
-
-        for w_scores in evidence_scores:
-            new_bba = likelihood_to_bba(w_scores, theta_key=theta)
-            bba = dempster_combine(bba, new_bba)
-
-        # strip ignorance mass → renormalize over hypotheses only
-        posterior = {h: bba.get(h, 0.0) for h in hyps}
-        total = sum(posterior.values())
-        if total > 0:
-            posterior = {h: v / total for h, v in posterior.items()}
-        return posterior
+        # fall back to Yager only when conflict is extreme — protects against
+        # the case where two strong contradictory clues would collapse posterior
+        conflict = _evidence_conflict(evidence_scores)
+        if conflict > DST_CONFLICT_THR:
+            return _dst_fallback(prior, evidence_scores)
+        return bayes_post

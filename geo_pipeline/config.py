@@ -13,7 +13,7 @@ RESULTS_DIR     = os.environ.get("RESULTS_DIR",     "/cvhci/temp/szuo/geo_result
 # ── GeoBayes hyperparams (kept identical to paper) ────────────────────────────
 PRIOR_TEMP      = 1.5    # T  in Eq.5
 PRIOR_CUTOFF    = 0.6    # τp in Eq.5
-TRANSITION_THR  = 0.35   # τ_transition (lowered: with 8-12 broad country candidates, even correct top usually sits around 0.3-0.4)
+TRANSITION_THR  = 0.55   # τ_transition (GeoBayes paper uses 0.7; we use 0.55 because Qwen2.5-VL is more diffuse than the paper's run. Lower if coarse never transitions; raise toward 0.7 if false transitions are happening.)
 ENHANCE_THR     = 0.05   # τ_enhance  (ΔP threshold)
 BETA            = 0.693  # ln2
 

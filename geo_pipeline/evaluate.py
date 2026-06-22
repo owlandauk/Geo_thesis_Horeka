@@ -95,6 +95,58 @@ def geocode(location_name: str):
     return None
 
 
+def _pred_to_coords(pred: dict) -> tuple | None:
+    """
+    Hierarchical fallback strategy:
+      1. Try street → city → country geocoding (precise, but a wrong country
+         is catastrophic for the continent threshold).
+      2. If the country-level posterior is low confidence (<0.5) OR the top-2
+         candidates cross continents, decline the precise geocode and return
+         the continent centroid of the most-likely continent across the top-3
+         candidates. This trades precision (city/region accuracy) for recall
+         at the continent level (<2500 km).
+      3. If everything fails, last-resort continent centroid from top country name.
+
+    Rationale: GeoBayes-style multiplicative update produces a posterior; we
+    should use that posterior's *certainty* to decide how confidently to commit
+    to a specific country geocode versus a continent centroid.
+    """
+    country_post = pred.get("country_posterior", {}) or {}
+    top_country = pred.get("country")
+    country_conf = country_post.get(top_country, 0.0) if top_country else 0.0
+
+    # Identify the dominant continent across top-3 country candidates.
+    sorted_countries = sorted(country_post.items(), key=lambda kv: -kv[1])[:3]
+    continent_votes: dict[str, float] = {}
+    for cname, p in sorted_countries:
+        cont = _continent_from_name(cname)
+        if cont:
+            continent_votes[cont] = continent_votes.get(cont, 0.0) + p
+    dominant_cont = max(continent_votes, key=continent_votes.get) if continent_votes else None
+    cross_continent = len(continent_votes) >= 2 and country_conf < 0.6
+
+    # Try precise geocoding first
+    for level in ["street", "city", "country"]:
+        name = pred.get(level)
+        if name and name != "Unknown":
+            coords = geocode(name)
+            if coords:
+                # If top country is uncertain AND top-2 candidates cross continents,
+                # the precise geocode is risky — fall back to continent centroid.
+                if level == "country" and cross_continent and dominant_cont:
+                    return _CONTINENT_CENTROIDS[dominant_cont]
+                return coords
+
+    # All geocoding failed — last resort continent centroid
+    if dominant_cont and dominant_cont in _CONTINENT_CENTROIDS:
+        return _CONTINENT_CENTROIDS[dominant_cont]
+    if top_country:
+        cont = _continent_from_name(top_country)
+        if cont and cont in _CONTINENT_CENTROIDS:
+            return _CONTINENT_CENTROIDS[cont]
+    return None
+
+
 def evaluate(args):
     mllm     = MLLMClient()
     pipeline = GeoPipeline(mllm)
@@ -120,21 +172,7 @@ def evaluate(args):
             continue
 
         for sample, pred in zip(samples, preds):
-            pred_coords = None
-            for level in ["street", "city", "country"]:
-                name = pred.get(level)
-                if name and name != "Unknown":
-                    pred_coords = geocode(name)
-                    if pred_coords:
-                        break
-
-            # Continent fallback: if all geocoding failed, drop to continent centroid
-            # of the predicted country so the <2500 km threshold can still hit.
-            if pred_coords is None:
-                country_name = pred.get("country")
-                cont = _continent_from_name(country_name) if country_name else None
-                if cont and cont in _CONTINENT_CENTROIDS:
-                    pred_coords = _CONTINENT_CENTROIDS[cont]
+            pred_coords = _pred_to_coords(pred)
 
             gt_lat, gt_lon = sample["gt_lat"], sample["gt_lon"]
             dist_km = haversine(gt_lat, gt_lon, pred_coords[0], pred_coords[1]) \

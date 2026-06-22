@@ -53,30 +53,59 @@ def _softmax_prior(scores: dict[str, float]) -> dict[str, float]:
 # ── Prompt builders ────────────────────────────────────────────────────────────
 
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
-    level_hint = {
-        "country": (
-            "List 8 to 12 candidate countries spanning DIFFERENT continents — "
-            "include at least one candidate each from Asia, Europe, Africa, "
-            "North America, South America, and Oceania, even if their initial "
-            "confidence is low. Do NOT restrict to a single region. "
-            "Then generate a plan to verify which one is correct."
-        ),
-        "city":   "Identify 5 to 8 most likely cities and generate a plan to verify.",
-        "street": "Identify the most likely streets/districts and generate a plan to verify.",
-    }[level]
+    """
+    Country-level prompt fuses two ideas from the literature:
+      - GLOBE (NeurIPS-25, Fig. 2): force structured reasoning across 4 visual cue
+        categories BEFORE naming any country — prevents commitment to nearby-but-
+        wrong countries because the model has to enumerate cues first.
+      - GeoBayes (AAAI-26, Tab. 3): 5 country candidates is the sweet spot —
+        Top-5 country recall on YFCC4K = 74.3% (Top-1 = 50.7%). Listing more
+        than 5 dilutes probability mass; listing fewer drops recall.
+
+    City/street levels follow GeoBayes (5 candidates, conditioned on parent context).
+    """
+    if level == "country":
+        instruction = (
+            "Step 1 — Analyze the image across these FOUR visual cue categories. "
+            "For each, briefly describe what you observe (one phrase each):\n"
+            "  (a) Architecture & building style\n"
+            "  (b) Signage & written language/script\n"
+            "  (c) Street layout, vegetation & terrain\n"
+            "  (d) License plates, road signs & vehicle types\n\n"
+            "Step 2 — Based on those cues, list the TOP 5 most likely countries "
+            "(across different regions if cues are ambiguous). For each, assign a "
+            "confidence in [0,1] that reflects how strongly the cues support it.\n\n"
+            "Step 3 — Build a verification plan: 4-6 short, specific tasks that "
+            "would DISTINGUISH between the candidates (not just confirm the top one). "
+            "Each task should target a specific bbox or visual feature."
+        )
+    elif level == "city":
+        instruction = (
+            "List the TOP 5 most likely cities given the parent country context. "
+            "Then build a 3-5 task verification plan that distinguishes between them."
+        )
+    else:  # street
+        instruction = (
+            "List the most likely streets, districts, or neighborhoods within the "
+            "parent city. Build a short verification plan."
+        )
+
     return [
         {
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
                 {"type": "text", "text": (
-                    f"You are a geolocation expert. {level_hint}\n"
-                    + (f"Prior context: {context}\n" if context else "")
-                    + "\nAnalyze this image and respond with JSON:\n"
+                    f"You are an expert geolocation analyst. {instruction}\n"
+                    + (f"\nPrior context: {context}\n" if context else "")
+                    + "\nRespond with JSON only:\n"
                     '{\n'
+                    '  "cues": {"architecture": "<phrase>", "signage": "<phrase>", '
+                    '"layout": "<phrase>", "plates_signs": "<phrase>"},\n'
                     '  "hypotheses": [{"location": "<name>", "confidence": <0-1>}, ...],\n'
                     '  "verification_plan": [{"desc": "<what to check>", "bbox": [x,y,w,h] or null}, ...]\n'
-                    '}'
+                    '}\n'
+                    "Note: the 'cues' field is optional for city/street levels."
                 )},
             ],
         }
@@ -84,24 +113,93 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
 
 
 def _verify_prompt(image: Image.Image, task: dict, hypotheses: list[str], level: str) -> list:
-    hyp_str = ", ".join(hypotheses[:5])
+    """
+    Implements GeoBayes 'Probability Thought' (AAAI-26, Fig. 1d): instead of a
+    freeform evidence description, the model is explicitly asked to rate the
+    evidence against EACH candidate hypothesis. This is the load-bearing trick
+    in the original paper — every clue is scored against every candidate, not
+    just the leading one, so contradictory evidence can cancel a wrong prior.
+    """
+    # cap at 5 hypotheses to match GeoBayes Top-5 setting
+    hyps = hypotheses[:5]
+    hyp_lines = "\n".join(f"  - {h}" for h in hyps)
     bbox = task.get("bbox")
     region_note = f" Focus on region [x,y,w,h]={bbox}." if bbox else ""
+
     return [
         {
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
                 {"type": "text", "text": (
-                    f"Task: {task['desc']}.{region_note}\n"
-                    f"Current hypotheses: {hyp_str}\n"
+                    f"Verification task: {task['desc']}.{region_note}\n"
                     f"Reasoning level: {level}\n\n"
-                    "Describe what you observe and how it relates to the hypotheses.\n"
-                    "Respond with: <observation text>"
+                    f"Candidate hypotheses:\n{hyp_lines}\n\n"
+                    "Step 1 — Describe what you observe in 1-2 sentences "
+                    "(the visual evidence, only what is actually visible).\n\n"
+                    "Step 2 — For EACH candidate hypothesis above, state whether "
+                    "this evidence supports it (S), contradicts it (C), or is "
+                    "neutral (N). Be honest — most evidence will be neutral for "
+                    "most candidates.\n\n"
+                    "Respond in this exact format:\n"
+                    "Observation: <what you see>\n"
+                    "Support: <hypothesis_1>=S/C/N; <hypothesis_2>=S/C/N; ..."
                 )},
             ],
         }
     ]
+
+
+def _geo_reasoner_prompt(image: Image.Image) -> list:
+    """
+    GeoReasoner (ICML-24) freeform prompt — used as a complementary signal to
+    the structured 4-cue prompt. Empirically the two prompts fail on different
+    images, so ensembling them at country-level boosts Top-1 country recall.
+
+    Output format follows GeoReasoner Fig. 3 verbatim: {'country', 'city', 'reasons'}.
+    """
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": (
+                    "According to the content of the image, please think step by "
+                    "step and deduce in which country and city the image is most "
+                    "likely located and give the most important reason. Output "
+                    "in JSON format, e.g. "
+                    '{"country":"", "city":"", "reasons":""}.'
+                )},
+            ],
+        }
+    ]
+
+
+def _merge_geo_reasoner_seed(prior: dict[str, float],
+                             reasoner_country: str | None,
+                             boost: float = 0.35) -> dict[str, float]:
+    """
+    Inject the GeoReasoner top-1 country guess into the structured prior.
+    If the guess is already in the prior: boost it. If not: add with `boost`
+    probability mass, renormalize. The boost is calibrated so that a strong
+    consensus (both prompts agree) reliably crosses TRANSITION_THR.
+    """
+    if not reasoner_country:
+        return prior
+    name = reasoner_country.strip()
+    if not name or name.lower() in ("unknown", ""):
+        return prior
+
+    merged = dict(prior)
+    if name in merged:
+        merged[name] = merged[name] + boost
+    else:
+        merged[name] = boost
+
+    total = sum(merged.values())
+    if total <= 0:
+        return prior
+    return {k: v / total for k, v in merged.items()}
 
 
 # ── Main pipeline class ────────────────────────────────────────────────────────
@@ -117,17 +215,30 @@ class GeoPipeline:
         self.pomdp = POMDPModule(mllm)
 
     def _hypothesize(self, image: Image.Image, level: str, context: str = "") -> tuple[dict, list]:
-        """Returns (prior_dict, verification_plan_list)."""
+        """Returns (prior_dict, verification_plan_list).
+
+        Country level: ensembles the GLOBE 4-cue structured prompt with a
+        GeoReasoner freeform prompt — the two have largely disjoint failure
+        modes, so combining them boosts Top-1 country recall.
+        """
         messages = _hypothesize_prompt(image, level, context)
         response = self.mllm.generate(messages)
         parsed = _try_parse_json(response)
         if parsed is None or "hypotheses" not in parsed:
-            # fallback: single hypothesis with uniform prior
             return {"Unknown": 1.0}, []
 
         raw_scores = {h["location"]: h.get("confidence", 0.5) for h in parsed["hypotheses"]}
         prior = _softmax_prior(raw_scores)
         plan  = parsed.get("verification_plan", [])
+
+        if level == "country":
+            r_msg = _geo_reasoner_prompt(image)
+            r_resp = self.mllm.generate(r_msg)
+            r_parsed = _try_parse_json(r_resp)
+            rc = r_parsed.get("country") if r_parsed else None
+            if rc:
+                prior = _merge_geo_reasoner_seed(prior, rc)
+
         return prior, plan
 
     def _run_level(
@@ -238,6 +349,19 @@ class GeoPipeline:
                                   for h in parsed["hypotheses"]}
                     priors.append(_softmax_prior(raw_scores))
                     plans.append(parsed.get("verification_plan", []))
+
+            # ── Country-level: add GeoReasoner freeform second prompt as a ──────
+            # complementary signal (ensemble across two prompt structures). Only
+            # at country level — at city/street the context-conditioned single
+            # prompt is enough.
+            if level == "country":
+                reasoner_msgs = [_geo_reasoner_prompt(images[i]) for i in range(n)]
+                reasoner_resps = self.mllm.batch_generate(reasoner_msgs)
+                for i, resp in enumerate(reasoner_resps):
+                    parsed = _try_parse_json(resp)
+                    rc = parsed.get("country") if parsed else None
+                    if rc and "Unknown" not in priors[i]:
+                        priors[i] = _merge_geo_reasoner_seed(priors[i], rc)
 
             # seed context from parent level
             if level != "country":
