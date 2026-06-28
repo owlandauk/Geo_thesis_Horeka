@@ -36,6 +36,88 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
 _geocoder = Nominatim(user_agent="geo_pipeline_eval", timeout=10)
 
 
+# Continent centroids — used as a last-resort fallback so the continent
+# threshold (<2500 km) can still hit even when country/city/street geocoding
+# all fail. Coordinates are rough geographic centers.
+_CONTINENT_CENTROIDS = {
+    "Africa":        (1.65,   17.83),
+    "Asia":          (34.05, 100.62),
+    "Europe":        (54.53,  15.26),
+    "North America": (54.53, -105.26),
+    "South America": (-8.78,  -55.49),
+    "Oceania":       (-22.74, 140.02),
+    "Antarctica":    (-82.86,  21.00),
+}
+
+
+# Country name → continent. Covers the high-prevalence YFCC4K countries plus
+# common alternate names (Burma/Myanmar, Holland/Netherlands, etc.) that
+# Nominatim sometimes mishandles. Only used for the continent-centroid
+# fallback; precise geocoding still goes through Nominatim first.
+_COUNTRY_TO_CONTINENT = {
+    # Asia
+    "china": "Asia", "japan": "Asia", "south korea": "Asia", "korea": "Asia",
+    "north korea": "Asia", "india": "Asia", "pakistan": "Asia", "bangladesh": "Asia",
+    "thailand": "Asia", "vietnam": "Asia", "indonesia": "Asia", "malaysia": "Asia",
+    "singapore": "Asia", "philippines": "Asia", "taiwan": "Asia", "myanmar": "Asia",
+    "burma": "Asia", "cambodia": "Asia", "laos": "Asia", "nepal": "Asia",
+    "sri lanka": "Asia", "mongolia": "Asia", "kazakhstan": "Asia",
+    "uzbekistan": "Asia", "iran": "Asia", "iraq": "Asia", "saudi arabia": "Asia",
+    "uae": "Asia", "israel": "Asia", "turkey": "Asia", "jordan": "Asia",
+    "lebanon": "Asia", "syria": "Asia", "qatar": "Asia", "kuwait": "Asia",
+    "oman": "Asia", "afghanistan": "Asia",
+    # Europe
+    "germany": "Europe", "france": "Europe", "italy": "Europe", "spain": "Europe",
+    "portugal": "Europe", "united kingdom": "Europe", "uk": "Europe",
+    "great britain": "Europe", "england": "Europe", "scotland": "Europe",
+    "wales": "Europe", "ireland": "Europe", "netherlands": "Europe",
+    "holland": "Europe", "belgium": "Europe", "switzerland": "Europe",
+    "austria": "Europe", "poland": "Europe", "czech republic": "Europe",
+    "czechia": "Europe", "hungary": "Europe", "greece": "Europe",
+    "sweden": "Europe", "norway": "Europe", "finland": "Europe", "denmark": "Europe",
+    "iceland": "Europe", "russia": "Europe", "ukraine": "Europe",
+    "romania": "Europe", "bulgaria": "Europe", "serbia": "Europe",
+    "croatia": "Europe", "slovenia": "Europe", "slovakia": "Europe",
+    "estonia": "Europe", "latvia": "Europe", "lithuania": "Europe",
+    "luxembourg": "Europe", "malta": "Europe", "cyprus": "Europe",
+    "albania": "Europe", "bosnia": "Europe", "macedonia": "Europe",
+    # Africa
+    "egypt": "Africa", "morocco": "Africa", "south africa": "Africa",
+    "kenya": "Africa", "nigeria": "Africa", "ethiopia": "Africa",
+    "ghana": "Africa", "algeria": "Africa", "tunisia": "Africa",
+    "uganda": "Africa", "tanzania": "Africa", "senegal": "Africa",
+    "zimbabwe": "Africa", "namibia": "Africa", "botswana": "Africa",
+    "madagascar": "Africa", "libya": "Africa", "sudan": "Africa",
+    "ivory coast": "Africa", "cameroon": "Africa", "angola": "Africa",
+    "mozambique": "Africa", "zambia": "Africa", "rwanda": "Africa",
+    # North America
+    "united states": "North America", "usa": "North America",
+    "us": "North America", "america": "North America",
+    "canada": "North America", "mexico": "North America", "cuba": "North America",
+    "jamaica": "North America", "guatemala": "North America",
+    "panama": "North America", "costa rica": "North America",
+    "honduras": "North America", "nicaragua": "North America",
+    "el salvador": "North America", "dominican republic": "North America",
+    "haiti": "North America", "puerto rico": "North America",
+    # South America
+    "brazil": "South America", "argentina": "South America",
+    "chile": "South America", "peru": "South America",
+    "colombia": "South America", "venezuela": "South America",
+    "ecuador": "South America", "bolivia": "South America",
+    "uruguay": "South America", "paraguay": "South America",
+    "guyana": "South America", "suriname": "South America",
+    # Oceania
+    "australia": "Oceania", "new zealand": "Oceania", "fiji": "Oceania",
+    "papua new guinea": "Oceania", "samoa": "Oceania", "tonga": "Oceania",
+}
+
+
+def _continent_of(country: str) -> str | None:
+    if not country:
+        return None
+    return _COUNTRY_TO_CONTINENT.get(country.strip().lower())
+
+
 def geocode(location_name: str):
     """Name → (lat, lon). Returns None if lookup fails."""
     try:
@@ -48,6 +130,50 @@ def geocode(location_name: str):
     except GeocoderRateLimited:
         time.sleep(5)
     return None
+
+
+def _geocode_with_country(name: str, country: str | None):
+    """Try the bare name first; if it fails, retry as 'name, country'.
+
+    Nominatim's gazetteer is ambiguous for many city/street names (a dozen
+    "Springfield"s, two "Naples", etc.). When the predicted country is
+    available, qualifying the query shrinks the search space and usually
+    resolves to the right hit. Only retries when (a) bare lookup returned
+    None and (b) the country isn't already in the name string.
+    """
+    coords = geocode(name)
+    if coords is not None:
+        return coords
+    if country and country.lower() not in ("unknown", "") \
+            and country.lower() not in name.lower():
+        return geocode(f"{name}, {country}")
+    return None
+
+
+def _continent_fallback_coords(pred: dict) -> tuple | None:
+    """Vote a continent from the top-3 country posterior and return its centroid.
+
+    Used as a last resort when Nominatim returns None for every level. The
+    posterior is informative even when the argmax country name doesn't geocode
+    (e.g. argmax='Burma', no Nominatim hit, but Asia is still right). Returns
+    None if the country posterior is empty or no candidate maps to a continent.
+    """
+    country_post = pred.get("country_posterior", {}) or {}
+    if not country_post:
+        # try the bare country name as a last resort
+        cont = _continent_of(pred.get("country") or "")
+        return _CONTINENT_CENTROIDS.get(cont) if cont else None
+
+    sorted_countries = sorted(country_post.items(), key=lambda kv: -kv[1])[:3]
+    votes: dict[str, float] = {}
+    for cname, p in sorted_countries:
+        cont = _continent_of(cname)
+        if cont:
+            votes[cont] = votes.get(cont, 0.0) + p
+    if not votes:
+        return None
+    best = max(votes, key=votes.get)
+    return _CONTINENT_CENTROIDS.get(best)
 
 
 def evaluate(args):
@@ -75,13 +201,21 @@ def evaluate(args):
             continue
 
         for sample, pred in zip(samples, preds):
+            pred_country = pred.get("country")
             pred_coords = None
+            # Hierarchical geocode: street → city → country. For street/city
+            # use country-qualified retry on Nominatim miss.
             for level in ["street", "city", "country"]:
                 name = pred.get(level)
                 if name and name != "Unknown":
-                    pred_coords = geocode(name)
+                    qualifier = pred_country if level in ("street", "city") else None
+                    pred_coords = _geocode_with_country(name, qualifier)
                     if pred_coords:
                         break
+            # Last-resort continent centroid (saves the <=2500km threshold when
+            # Nominatim returns None for every level, e.g. obsolete country names).
+            if pred_coords is None:
+                pred_coords = _continent_fallback_coords(pred)
 
             gt_lat, gt_lon = sample["gt_lat"], sample["gt_lon"]
             dist_km = haversine(gt_lat, gt_lon, pred_coords[0], pred_coords[1]) \
