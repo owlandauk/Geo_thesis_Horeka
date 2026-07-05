@@ -52,9 +52,21 @@ def _softmax_prior(scores: dict[str, float]) -> dict[str, float]:
 
 # ── Prompt builders ────────────────────────────────────────────────────────────
 
+_COUNTRY_HINT = (
+    "Identify at least 8 candidate countries, drawn from AT LEAST 3 different "
+    "continents. Do not default to North America or Western Europe when the "
+    "evidence is ambiguous — southern-hemisphere locations (Australia, Brazil, "
+    "Argentina, South Africa, New Zealand) and African, South American, and "
+    "Southeast Asian countries are frequently under-considered. Use vegetation "
+    "type (eucalyptus, palm, tropical broadleaf vs temperate deciduous), sky "
+    "and sun angle, driving side, license-plate format, script/signage, and "
+    "architectural cues to keep the candidate set diverse. Then generate a "
+    "plan to verify."
+)
+
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
     level_hint = {
-        "country": "Identify the most likely countries and generate a plan to verify.",
+        "country": _COUNTRY_HINT,
         "city":    "Identify the most likely cities and generate a plan to verify.",
         "street":  "Identify the most likely streets/districts and generate a plan to verify.",
     }[level]

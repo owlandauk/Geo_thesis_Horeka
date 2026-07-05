@@ -231,6 +231,10 @@ def evaluate(args):
                 "pred_lat":     pred_coords[0] if pred_coords else None,
                 "pred_lon":     pred_coords[1] if pred_coords else None,
                 "dist_km":      dist_km,
+                "country_posterior": {
+                    k: round(float(v), 4)
+                    for k, v in (pred.get("country_posterior") or {}).items()
+                },
             }
             records.append(record)
             total += 1
