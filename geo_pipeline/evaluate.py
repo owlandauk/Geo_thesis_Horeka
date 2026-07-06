@@ -20,6 +20,7 @@ from geopy.exc import GeocoderTimedOut, GeocoderRateLimited
 from models.mllm_client import MLLMClient
 from pipeline import GeoPipeline
 from data.yfcc4k_loader import YFCC4KDataset
+from country_aliases import COUNTRY_TO_CONTINENT, continent_of, canonicalize_country
 from config import EVAL_THRESHOLDS, YFCC4K_IMG_DIR, YFCC4K_GPS_CSV
 
 
@@ -50,72 +51,8 @@ _CONTINENT_CENTROIDS = {
 }
 
 
-# Country name → continent. Covers the high-prevalence YFCC4K countries plus
-# common alternate names (Burma/Myanmar, Holland/Netherlands, etc.) that
-# Nominatim sometimes mishandles. Only used for the continent-centroid
-# fallback; precise geocoding still goes through Nominatim first.
-_COUNTRY_TO_CONTINENT = {
-    # Asia
-    "china": "Asia", "japan": "Asia", "south korea": "Asia", "korea": "Asia",
-    "north korea": "Asia", "india": "Asia", "pakistan": "Asia", "bangladesh": "Asia",
-    "thailand": "Asia", "vietnam": "Asia", "indonesia": "Asia", "malaysia": "Asia",
-    "singapore": "Asia", "philippines": "Asia", "taiwan": "Asia", "myanmar": "Asia",
-    "burma": "Asia", "cambodia": "Asia", "laos": "Asia", "nepal": "Asia",
-    "sri lanka": "Asia", "mongolia": "Asia", "kazakhstan": "Asia",
-    "uzbekistan": "Asia", "iran": "Asia", "iraq": "Asia", "saudi arabia": "Asia",
-    "uae": "Asia", "israel": "Asia", "turkey": "Asia", "jordan": "Asia",
-    "lebanon": "Asia", "syria": "Asia", "qatar": "Asia", "kuwait": "Asia",
-    "oman": "Asia", "afghanistan": "Asia",
-    # Europe
-    "germany": "Europe", "france": "Europe", "italy": "Europe", "spain": "Europe",
-    "portugal": "Europe", "united kingdom": "Europe", "uk": "Europe",
-    "great britain": "Europe", "england": "Europe", "scotland": "Europe",
-    "wales": "Europe", "ireland": "Europe", "netherlands": "Europe",
-    "holland": "Europe", "belgium": "Europe", "switzerland": "Europe",
-    "austria": "Europe", "poland": "Europe", "czech republic": "Europe",
-    "czechia": "Europe", "hungary": "Europe", "greece": "Europe",
-    "sweden": "Europe", "norway": "Europe", "finland": "Europe", "denmark": "Europe",
-    "iceland": "Europe", "russia": "Europe", "ukraine": "Europe",
-    "romania": "Europe", "bulgaria": "Europe", "serbia": "Europe",
-    "croatia": "Europe", "slovenia": "Europe", "slovakia": "Europe",
-    "estonia": "Europe", "latvia": "Europe", "lithuania": "Europe",
-    "luxembourg": "Europe", "malta": "Europe", "cyprus": "Europe",
-    "albania": "Europe", "bosnia": "Europe", "macedonia": "Europe",
-    # Africa
-    "egypt": "Africa", "morocco": "Africa", "south africa": "Africa",
-    "kenya": "Africa", "nigeria": "Africa", "ethiopia": "Africa",
-    "ghana": "Africa", "algeria": "Africa", "tunisia": "Africa",
-    "uganda": "Africa", "tanzania": "Africa", "senegal": "Africa",
-    "zimbabwe": "Africa", "namibia": "Africa", "botswana": "Africa",
-    "madagascar": "Africa", "libya": "Africa", "sudan": "Africa",
-    "ivory coast": "Africa", "cameroon": "Africa", "angola": "Africa",
-    "mozambique": "Africa", "zambia": "Africa", "rwanda": "Africa",
-    # North America
-    "united states": "North America", "usa": "North America",
-    "us": "North America", "america": "North America",
-    "canada": "North America", "mexico": "North America", "cuba": "North America",
-    "jamaica": "North America", "guatemala": "North America",
-    "panama": "North America", "costa rica": "North America",
-    "honduras": "North America", "nicaragua": "North America",
-    "el salvador": "North America", "dominican republic": "North America",
-    "haiti": "North America", "puerto rico": "North America",
-    # South America
-    "brazil": "South America", "argentina": "South America",
-    "chile": "South America", "peru": "South America",
-    "colombia": "South America", "venezuela": "South America",
-    "ecuador": "South America", "bolivia": "South America",
-    "uruguay": "South America", "paraguay": "South America",
-    "guyana": "South America", "suriname": "South America",
-    # Oceania
-    "australia": "Oceania", "new zealand": "Oceania", "fiji": "Oceania",
-    "papua new guinea": "Oceania", "samoa": "Oceania", "tonga": "Oceania",
-}
-
-
-def _continent_of(country: str) -> str | None:
-    if not country:
-        return None
-    return _COUNTRY_TO_CONTINENT.get(country.strip().lower())
+# Country name → continent map + canonicalizer live in country_aliases.py
+# (shared with pipeline.py). Import re-exports above.
 
 
 def geocode(location_name: str):
@@ -161,13 +98,13 @@ def _continent_fallback_coords(pred: dict) -> tuple | None:
     country_post = pred.get("country_posterior", {}) or {}
     if not country_post:
         # try the bare country name as a last resort
-        cont = _continent_of(pred.get("country") or "")
+        cont = continent_of(pred.get("country") or "")
         return _CONTINENT_CENTROIDS.get(cont) if cont else None
 
     sorted_countries = sorted(country_post.items(), key=lambda kv: -kv[1])[:3]
     votes: dict[str, float] = {}
     for cname, p in sorted_countries:
-        cont = _continent_of(cname)
+        cont = continent_of(cname)
         if cont:
             votes[cont] = votes.get(cont, 0.0) + p
     if not votes:
@@ -202,6 +139,20 @@ def evaluate(args):
 
         for sample, pred in zip(samples, preds):
             pred_country = pred.get("country")
+            # If the hypothesize step failed to name a real country (parser
+            # returned "Unknown" or a non-country string like "Southeast Asia"),
+            # try to salvage one from the city/street strings — they very often
+            # look like "Toronto, Canada" or "Paris, France". This is EVALUATE-
+            # ONLY: we never feed the fallback back into country_posterior, so
+            # DST/POMDP behaviour is unchanged. Rescues ~73% of Unknown records
+            # per full_v4 offline check.
+            if not pred_country or canonicalize_country(pred_country) is None:
+                for field in ("city", "street"):
+                    salvaged = canonicalize_country(pred.get(field) or "")
+                    if salvaged:
+                        pred_country = salvaged
+                        break
+
             pred_coords = None
             # Hierarchical geocode: street → city → country. For street/city
             # use country-qualified retry on Nominatim miss.
@@ -225,7 +176,7 @@ def evaluate(args):
                 "photo_id":    sample["photo_id"],
                 "gt_lat":      gt_lat,
                 "gt_lon":      gt_lon,
-                "pred_country": pred.get("country"),
+                "pred_country": pred_country,
                 "pred_city":    pred.get("city"),
                 "pred_street":  pred.get("street"),
                 "pred_lat":     pred_coords[0] if pred_coords else None,
@@ -235,6 +186,9 @@ def evaluate(args):
                     k: round(float(v), 4)
                     for k, v in (pred.get("country_posterior") or {}).items()
                 },
+                "raw_country_response": pred.get("country_raw_response"),
+                "raw_city_response":    pred.get("city_raw_response"),
+                "raw_street_response":  pred.get("street_raw_response"),
             }
             records.append(record)
             total += 1

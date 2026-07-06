@@ -21,6 +21,7 @@ from models.mllm_client import MLLMClient
 from modules.sl import SLModule
 from modules.dst import DSTModule
 from modules.pomdp import POMDPModule
+from country_aliases import canonicalize_country
 from config import (
     PRIOR_TEMP, PRIOR_CUTOFF, TRANSITION_THR,
     VERIFY_MAX_NEW_TOKENS, POMDP_MAX_NEW_TOKENS,
@@ -50,23 +51,37 @@ def _softmax_prior(scores: dict[str, float]) -> dict[str, float]:
     return {h: v / total for h, v in exps.items()}
 
 
-# ── Prompt builders ────────────────────────────────────────────────────────────
+def _collect_scores(hypotheses: list, level: str) -> dict[str, float]:
+    """Collect {location: confidence} from parsed hypotheses.
 
-_COUNTRY_HINT = (
-    "Identify at least 8 candidate countries, drawn from AT LEAST 3 different "
-    "continents. Do not default to North America or Western Europe when the "
-    "evidence is ambiguous — southern-hemisphere locations (Australia, Brazil, "
-    "Argentina, South Africa, New Zealand) and African, South American, and "
-    "Southeast Asian countries are frequently under-considered. Use vegetation "
-    "type (eucalyptus, palm, tropical broadleaf vs temperate deciduous), sky "
-    "and sun angle, driving side, license-plate format, script/signage, and "
-    "architectural cues to keep the candidate set diverse. Then generate a "
-    "plan to verify."
-)
+    At the country level we canonicalize location names via the alias map
+    before scoring, so "USA"/"California, USA"/"Southeast Asia" don't leak
+    through as distinct entries (see full_v4 diagnosis: raw MLLM strings
+    that didn't match a country killed 60% of records to Unknown). When
+    multiple candidates map to the same canonical country, keep the max
+    confidence — we don't want to double-count "USA" and "United States".
+    Non-country levels keep the raw string.
+    """
+    scores: dict[str, float] = {}
+    for h in hypotheses:
+        loc = h.get("location")
+        if not loc:
+            continue
+        conf = h.get("confidence", 0.5)
+        if level == "country":
+            canon = canonicalize_country(loc)
+            if canon is None:
+                continue  # drop non-country strings like "Southeast Asia"
+            loc = canon
+        scores[loc] = max(scores.get(loc, 0.0), conf)
+    return scores
+
+
+# ── Prompt builders ────────────────────────────────────────────────────────────
 
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
     level_hint = {
-        "country": _COUNTRY_HINT,
+        "country": "Identify the most likely countries and generate a plan to verify.",
         "city":    "Identify the most likely cities and generate a plan to verify.",
         "street":  "Identify the most likely streets/districts and generate a plan to verify.",
     }[level]
@@ -122,19 +137,19 @@ class GeoPipeline:
         self.dst   = DSTModule()
         self.pomdp = POMDPModule(mllm)
 
-    def _hypothesize(self, image: Image.Image, level: str, context: str = "") -> tuple[dict, list]:
-        """Returns (prior_dict, verification_plan_list)."""
+    def _hypothesize(self, image: Image.Image, level: str, context: str = "") -> tuple[dict, list, str]:
+        """Returns (prior_dict, verification_plan_list, raw_response)."""
         messages = _hypothesize_prompt(image, level, context)
         response = self.mllm.generate(messages)
         parsed = _try_parse_json(response)
         if parsed is None or "hypotheses" not in parsed:
             # fallback: single hypothesis with uniform prior
-            return {"Unknown": 1.0}, []
+            return {"Unknown": 1.0}, [], response
 
-        raw_scores = {h["location"]: h.get("confidence", 0.5) for h in parsed["hypotheses"]}
-        prior = _softmax_prior(raw_scores)
+        raw_scores = _collect_scores(parsed["hypotheses"], level)
+        prior = _softmax_prior(raw_scores) if raw_scores else {"Unknown": 1.0}
         plan  = parsed.get("verification_plan", [])
-        return prior, plan
+        return prior, plan, response
 
     def _run_level(
         self,
@@ -195,7 +210,8 @@ class GeoPipeline:
         context      = ""
 
         for level in LEVELS:
-            prior, plan = self._hypothesize(image, level, context)
+            prior, plan, raw_resp = self._hypothesize(image, level, context)
+            result[f"{level}_raw_response"] = raw_resp
 
             # at city/street level, seed hypotheses from prior level result
             if level != "country" and result:
@@ -238,15 +254,18 @@ class GeoPipeline:
 
             priors = []
             plans  = []
-            for resp in hyp_responses:
+            for i, resp in enumerate(hyp_responses):
+                results[i][f"{level}_raw_response"] = resp
                 parsed = _try_parse_json(resp)
                 if parsed is None or "hypotheses" not in parsed:
                     priors.append({"Unknown": 1.0})
                     plans.append([])
                 else:
-                    raw_scores = {h["location"]: h.get("confidence", 0.5)
-                                  for h in parsed["hypotheses"]}
-                    priors.append(_softmax_prior(raw_scores))
+                    raw_scores = _collect_scores(parsed["hypotheses"], level)
+                    if raw_scores:
+                        priors.append(_softmax_prior(raw_scores))
+                    else:
+                        priors.append({"Unknown": 1.0})
                     plans.append(parsed.get("verification_plan", []))
 
             # seed context from parent level
