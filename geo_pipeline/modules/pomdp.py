@@ -101,7 +101,8 @@ class POMDPModule:
         """
         POMDP stopping condition — mirrors GeoBayes Eq.11 but adds a step cap.
         At street level: stop when tasks exhausted.
-        At other levels: stop when max_prob > TRANSITION_THR or tasks exhausted.
+        At other levels: stop when max_prob > TRANSITION_THR after at least
+        one verification step, or when tasks are exhausted.
         """
         from config import TRANSITION_THR
         max_prob = max(posterior.values(), default=0.0)
@@ -110,6 +111,6 @@ class POMDPModule:
             return True
         if all_tasks_exhausted:
             return True
-        if level != "street" and max_prob >= TRANSITION_THR:
+        if level != "street" and step > 0 and max_prob >= TRANSITION_THR:
             return True
         return False

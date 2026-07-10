@@ -83,6 +83,12 @@ def _geocode_level(name: str, level: str, country: str | None):
     if level in ("street", "city"):
         country_ok = bool(country and country.lower() not in ("unknown", ""))
         name_has_country = country_ok and country.lower() in name.lower()
+        embedded_country = canonicalize_country(name)
+        if embedded_country and (not country_ok or embedded_country != country.lower()):
+            coords = geocode(name)
+            if coords is not None:
+                return coords, f"{level}_embedded_country", "child_country_override"
+
         if country_ok and not name_has_country:
             coords = geocode(f"{name}, {country}")
             if coords is not None:

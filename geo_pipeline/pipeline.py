@@ -31,17 +31,68 @@ from config import (
 
 LEVELS = ["country", "city", "street"]
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _try_parse_json(text: str):
-    m = _JSON_RE.search(text)
-    if not m:
+    """Parse the first JSON object/array from raw model text."""
+    if isinstance(text, (dict, list)):
+        return text
+    if not isinstance(text, str):
         return None
+
+    stripped = text.strip()
     try:
-        return json.loads(m.group())
+        return json.loads(stripped)
     except json.JSONDecodeError:
+        pass
+
+    fenced = _FENCED_JSON_RE.search(stripped)
+    if fenced:
+        parsed = _try_parse_json(fenced.group(1))
+        if parsed is not None:
+            return parsed
+
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(stripped):
+        if ch not in "[{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(stripped[idx:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _parse_hypothesis_payload(text: str) -> dict | None:
+    """Normalize model/wrapper outputs to {hypotheses, verification_plan}."""
+    parsed = _try_parse_json(text)
+    if parsed is None:
         return None
+    if isinstance(parsed, list):
+        return {"hypotheses": parsed, "verification_plan": []}
+    if not isinstance(parsed, dict):
+        return None
+    if "hypotheses" in parsed:
+        return parsed
+
+    hypotheses: list[dict] = []
+    verification_plan: list[dict] = []
+
+    general = _parse_hypothesis_payload(parsed.get("general", ""))
+    if general:
+        hypotheses.extend(general.get("hypotheses", []))
+        verification_plan = general.get("verification_plan", []) or []
+
+    for cue_text in parsed.get("cue_responses", []) or []:
+        cue = _parse_hypothesis_payload(cue_text)
+        if cue:
+            hypotheses.extend(cue.get("hypotheses", []))
+
+    if hypotheses:
+        return {"hypotheses": hypotheses, "verification_plan": verification_plan}
+    return None
 
 
 def _softmax_prior(scores: dict[str, float]) -> dict[str, float]:
@@ -79,6 +130,32 @@ def _collect_scores(hypotheses: list, level: str) -> dict[str, float]:
     return scores
 
 
+def _format_top_candidates(posterior: dict[str, float], k: int = 3) -> str:
+    items = sorted((posterior or {}).items(), key=lambda x: -x[1])[:k]
+    return ", ".join(f"{loc} ({prob:.2f})" for loc, prob in items)
+
+
+def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str:
+    clues = "; ".join(key_evidence[-3:])
+    if level == "city":
+        countries = _format_top_candidates(result.get("country_posterior", {}))
+        return (
+            f"Country candidates: {countries}. "
+            "Prefer cities consistent with these countries, but include an explicitly named "
+            "city+country alternative if the visual evidence contradicts the top country. "
+            f"Key clues: {clues}"
+        )
+    if level == "street":
+        countries = _format_top_candidates(result.get("country_posterior", {}))
+        cities = _format_top_candidates(result.get("city_posterior", {}))
+        return (
+            f"Country candidates: {countries}. City candidates: {cities}. "
+            "Return street/district/landmark hypotheses with city and country when possible. "
+            f"Key clues: {clues}"
+        )
+    return ""
+
+
 # ── Prompt builders ────────────────────────────────────────────────────────────
 
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
@@ -94,8 +171,13 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                 {"type": "image", "image": image},
                 {"type": "text", "text": (
                     f"You are a geolocation expert. {level_hint}\n"
+                    "Return 3-5 plausible hypotheses when the image is ambiguous. "
+                    "For country-level reasoning, return country names only, not continents or regions. "
+                    "Do not default to United States or Canada from English text, generic roads, "
+                    "vegetation, architecture, online media, or product branding alone; assign high "
+                    "confidence only when there are explicit local clues. "
                     + (f"Prior context: {context}\n" if context else "")
-                    + "\nAnalyze this image and respond with JSON:\n"
+                    + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
                     '{\n'
                     '  "hypotheses": [{"location": "<name>", "confidence": <0-1>}, ...],\n'
                     '  "verification_plan": [{"desc": "<what to check>", "bbox": [x,y,w,h] or null}, ...]\n'
@@ -143,7 +225,7 @@ class GeoPipeline:
         """Returns (prior_dict, verification_plan_list, raw_response)."""
         messages = _hypothesize_prompt(image, level, context)
         response = self.mllm.generate(messages)
-        parsed = _try_parse_json(response)
+        parsed = _parse_hypothesis_payload(response)
         if parsed is None or "hypotheses" not in parsed:
             # fallback: single hypothesis with uniform prior
             return {"Unknown": 1.0}, [], response
@@ -214,8 +296,7 @@ class GeoPipeline:
         for level in LEVELS:
             # at city/street level, seed hypotheses from prior level result
             if level != "country" and result:
-                parent = result.get(LEVELS[LEVELS.index(level) - 1], "")
-                context = f"Located in {parent}. Key clues: {'; '.join(key_evidence[-3:])}"
+                context = _context_for_level(level, result, key_evidence)
 
             prior, plan, raw_resp = self._hypothesize(image, level, context)
             result[f"{level}_raw_response"] = raw_resp
@@ -250,11 +331,8 @@ class GeoPipeline:
         for level in LEVELS:
             # seed context from parent level before hypothesizing the next level
             if level != "country":
-                parent_level = LEVELS[LEVELS.index(level) - 1]
                 for i in range(n):
-                    parent = results[i].get(parent_level, "")
-                    clues = "; ".join(key_evidence[i][-3:])
-                    contexts[i] = f"Located in {parent}. Key clues: {clues}" if parent else ""
+                    contexts[i] = _context_for_level(level, results[i], key_evidence[i])
 
             # ── Hypothesize: one batch call for all images ──────────────────────
             hyp_messages = [_hypothesize_prompt(images[i], level, contexts[i]) for i in range(n)]
@@ -264,7 +342,7 @@ class GeoPipeline:
             plans  = []
             for i, resp in enumerate(hyp_responses):
                 results[i][f"{level}_raw_response"] = resp
-                parsed = _try_parse_json(resp)
+                parsed = _parse_hypothesis_payload(resp)
                 if parsed is None or "hypotheses" not in parsed:
                     priors.append({"Unknown": 1.0})
                     plans.append([])
