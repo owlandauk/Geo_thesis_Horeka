@@ -27,6 +27,8 @@ from country_aliases import canonicalize_country
 from config import (
     PRIOR_TEMP, PRIOR_CUTOFF, TRANSITION_THR,
     VERIFY_MAX_NEW_TOKENS, POMDP_MAX_NEW_TOKENS,
+    STRONG_POSTERIOR_THR, STABLE_MARGIN_THR, STABLE_ENTROPY_THR,
+    COUNTRY_REPLACE_ATTEMPTS,
 )
 
 LEVELS = ["country", "city", "street"]
@@ -135,6 +137,87 @@ def _format_top_candidates(posterior: dict[str, float], k: int = 3) -> str:
     return ", ".join(f"{loc} ({prob:.2f})" for loc, prob in items)
 
 
+def _posterior_stats(posterior: dict[str, float]) -> dict[str, float]:
+    """Return top mass, top1-top2 margin, and normalized entropy."""
+    vals = sorted((float(v) for v in (posterior or {}).values()), reverse=True)
+    if not vals:
+        return {"top": 0.0, "margin": 0.0, "entropy": 1.0}
+    top = vals[0]
+    margin = top - (vals[1] if len(vals) > 1 else 0.0)
+    if len(vals) <= 1:
+        entropy = 0.0
+    else:
+        entropy = -sum(v * math.log(max(v, 1e-12)) for v in vals) / math.log(len(vals))
+    return {"top": top, "margin": margin, "entropy": entropy}
+
+
+def _stable_for_descent(posterior: dict[str, float]) -> bool:
+    """Multi-signal gate for hierarchical descent.
+
+    Top probability alone is not enough: v8 showed that flat country posteriors
+    around 0.51 can still drive noisy city/street guesses. We descend only when
+    the top candidate is strong, or when it clears the transition threshold with
+    a meaningful margin or low normalized entropy.
+    """
+    stats = _posterior_stats(posterior)
+    if stats["top"] >= STRONG_POSTERIOR_THR:
+        return True
+    if stats["top"] < TRANSITION_THR:
+        return False
+    return stats["margin"] >= STABLE_MARGIN_THR or stats["entropy"] <= STABLE_ENTROPY_THR
+
+
+def _country_candidate_set(country_posterior: dict[str, float], k: int = 3) -> set[str]:
+    return {
+        country
+        for country, _ in sorted((country_posterior or {}).items(), key=lambda x: -x[1])[:k]
+    }
+
+
+def _child_country_conflict(location: str, country_posterior: dict[str, float]) -> bool:
+    child_country = canonicalize_country(location or "")
+    if not child_country:
+        return False
+    return child_country not in _country_candidate_set(country_posterior)
+
+
+def _filter_child_posterior(
+    posterior: dict[str, float],
+    country_posterior: dict[str, float],
+) -> tuple[dict[str, float], list[str]]:
+    """Drop child hypotheses that name countries outside top country candidates."""
+    if not posterior:
+        return posterior, []
+    kept = {}
+    conflicts = []
+    for loc, prob in posterior.items():
+        if _child_country_conflict(loc, country_posterior):
+            conflicts.append(loc)
+        else:
+            kept[loc] = prob
+    if not conflicts:
+        return posterior, []
+    if not kept:
+        return {"Unknown": 1.0}, conflicts
+    total = sum(kept.values())
+    return ({k: v / total for k, v in kept.items()} if total > 0 else kept), conflicts
+
+
+def _replace_context(level: str, posterior: dict[str, float], key_evidence: list[str]) -> str:
+    stats = _posterior_stats(posterior)
+    clues = "; ".join(key_evidence[-3:])
+    return (
+        "Previous country candidates remained unstable after verification. "
+        f"Top candidates were {_format_top_candidates(posterior, 5)}; "
+        f"top={stats['top']:.2f}, margin={stats['margin']:.2f}, entropy={stats['entropy']:.2f}. "
+        "Re-analyze from scratch and return a diverse country candidate set. "
+        "Avoid defaulting to any country from weak generic cues, but do not over-correct away from North America: "
+        "United States, Canada, and Mexico remain valid when road signs, traffic infrastructure, license plates, "
+        "landmarks, vegetation, or architecture clearly support them. "
+        f"Previous useful clues: {clues}"
+    )
+
+
 def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str:
     clues = "; ".join(key_evidence[-3:])
     if level == "city":
@@ -175,9 +258,11 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                     f"You are a geolocation expert. {level_hint}\n"
                     "Return 3-5 plausible hypotheses when the image is ambiguous. "
                     "For country-level reasoning, return country names only, not continents or regions. "
-                    "Do not default to United States or Canada from English text, generic roads, "
-                    "vegetation, architecture, online media, or product branding alone; assign high "
-                    "confidence only when there are explicit local clues. "
+                    "Do not default to any country from weak generic cues. English text, generic roads, "
+                    "vegetation, architecture, online media, or product branding alone are not enough for "
+                    "United States or Canada; however North America is valid when concrete road signs, "
+                    "traffic infrastructure, license plates, landmarks, vegetation, or architecture support it. "
+                    "Assign high confidence only when there are explicit local clues. "
                     + (f"Prior context: {context}\n" if context else "")
                     + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
                     '{\n'
@@ -307,16 +392,140 @@ class GeoPipeline:
                 image, level, prior, plan, key_evidence
             )
 
+            if level == "country" and not _stable_for_descent(posterior):
+                for _ in range(COUNTRY_REPLACE_ATTEMPTS):
+                    replace_context = _replace_context(level, posterior, key_evidence)
+                    prior, plan, raw_resp = self._hypothesize(image, level, replace_context)
+                    result[f"{level}_raw_response"] = raw_resp
+                    posterior, key_evidence = self._run_level(
+                        image, level, prior, plan, key_evidence
+                    )
+                    result["country_replaced"] = True
+                    if _stable_for_descent(posterior):
+                        break
+
+            if level in ("city", "street"):
+                filtered, conflicts = _filter_child_posterior(
+                    posterior, result.get("country_posterior", {})
+                )
+                if conflicts:
+                    result[f"{level}_backtrack_conflicts"] = conflicts[:5]
+                    posterior = filtered
+
             best = max(posterior, key=posterior.get)
             result[level] = best
             result[f"{level}_posterior"] = posterior
+            result[f"{level}_stable"] = _stable_for_descent(posterior)
 
             # stop early if confidence is very low (model has no signal)
             if posterior.get(best, 0) < 0.3 and level == "country":
                 break
+            if level == "country" and not _stable_for_descent(posterior):
+                # Replace could not produce a reliable country distribution.
+                # Avoid propagating a flat parent posterior into noisy child prompts.
+                for remaining in LEVELS[LEVELS.index(level) + 1:]:
+                    result[remaining] = "Unknown"
+                    result[f"{remaining}_posterior"] = {}
+                break
+            if level == "city" and best == "Unknown":
+                result["street"] = "Unknown"
+                result["street_posterior"] = {}
+                break
 
         result["posterior"] = posterior
         return result
+
+    def _run_level_batch(
+        self,
+        images: list,
+        level: str,
+        contexts: list[str],
+        key_evidence: list[list[str]],
+    ) -> tuple[list[str], list[dict[str, float]]]:
+        """Run one hierarchy level for a batch and update key_evidence in place."""
+        n = len(images)
+        hyp_messages = [_hypothesize_prompt(images[i], level, contexts[i]) for i in range(n)]
+        hyp_responses = self.mllm.batch_generate(hyp_messages)
+
+        priors = []
+        plans = []
+        for resp in hyp_responses:
+            parsed = _parse_hypothesis_payload(resp)
+            if parsed is None or "hypotheses" not in parsed:
+                priors.append({"Unknown": 1.0})
+                plans.append([])
+            else:
+                raw_scores = _collect_scores(parsed["hypotheses"], level)
+                priors.append(_softmax_prior(raw_scores) if raw_scores else {"Unknown": 1.0})
+                plans.append(parsed.get("verification_plan", []))
+
+        posteriors = [dict(p) for p in priors]
+        pending = [list(pl) for pl in plans]
+        steps = [0] * n
+        ev_scores_all = [[] for _ in range(n)]
+
+        while True:
+            active = [
+                i for i in range(n)
+                if not self.pomdp.should_stop(
+                    posteriors[i], steps[i], level, len(pending[i]) == 0
+                )
+            ]
+            if not active:
+                break
+
+            policy_msgs = []
+            policy_idx = []
+            task_choices = {}
+            for i in active:
+                if len(pending[i]) == 1:
+                    task_choices[i] = 0
+                else:
+                    policy_msgs.append(
+                        self.pomdp._make_policy_prompt(
+                            posteriors[i], pending[i], level, steps[i]
+                        )
+                    )
+                    policy_idx.append(i)
+
+            if policy_msgs:
+                policy_resps = self.mllm.batch_generate(
+                    policy_msgs, max_new_tokens=POMDP_MAX_NEW_TOKENS
+                )
+                for i, resp in zip(policy_idx, policy_resps):
+                    match = re.search(r'"?task_index"?\s*:\s*(\d+)', resp)
+                    idx = int(match.group(1)) if match else 0
+                    task_choices[i] = min(idx, len(pending[i]) - 1)
+
+            tasks = {i: pending[i].pop(task_choices[i]) for i in active}
+
+            verify_msgs = [
+                _verify_prompt(images[i], tasks[i], list(posteriors[i].keys()), level)
+                for i in active
+            ]
+            verify_resps = self.mllm.batch_generate(
+                verify_msgs, max_new_tokens=VERIFY_MAX_NEW_TOKENS
+            )
+            evidence_descs = {i: resp for i, resp in zip(active, verify_resps)}
+
+            sl_items = [
+                (evidence_descs[i], list(posteriors[i].keys()))
+                for i in active
+            ]
+            sl_results = self.sl.score_many(sl_items, level)
+
+            for k, i in enumerate(active):
+                w_scores = sl_results[k]
+                ev_scores_all[i].append(w_scores)
+                posteriors[i] = self.dst.fuse(priors[i], ev_scores_all[i])
+
+                max_w = max(w_scores.values(), default=1.0)
+                if max_w > 1.5:
+                    key_evidence[i].append(evidence_descs[i][:120])
+
+                steps[i] += 1
+
+        return hyp_responses, posteriors
 
     def predict_batch(self, images: list) -> list[dict]:
         """
@@ -326,118 +535,88 @@ class GeoPipeline:
         """
         n = len(images)
         # per-image state
-        results      = [{} for _ in range(n)]
+        results = [{} for _ in range(n)]
         key_evidence = [[] for _ in range(n)]
-        contexts     = [""] * n
+        contexts = [""] * n
+        skip_finer = [False] * n
 
         for level in LEVELS:
+            level_indices = [i for i in range(n) if not skip_finer[i]]
+            if not level_indices:
+                break
+
             # seed context from parent level before hypothesizing the next level
             if level != "country":
-                for i in range(n):
+                for i in level_indices:
                     contexts[i] = _context_for_level(level, results[i], key_evidence[i])
 
-            # ── Hypothesize: one batch call for all images ──────────────────────
-            hyp_messages = [_hypothesize_prompt(images[i], level, contexts[i]) for i in range(n)]
-            hyp_responses = self.mllm.batch_generate(hyp_messages)
+            subset_images = [images[i] for i in level_indices]
+            subset_contexts = [contexts[i] for i in level_indices]
+            subset_key_evidence = [key_evidence[i] for i in level_indices]
+            raw_responses, posteriors_subset = self._run_level_batch(
+                subset_images, level, subset_contexts, subset_key_evidence
+            )
+            posteriors_by_idx = {
+                idx: post for idx, post in zip(level_indices, posteriors_subset)
+            }
+            raw_by_idx = {
+                idx: raw for idx, raw in zip(level_indices, raw_responses)
+            }
 
-            priors = []
-            plans  = []
-            for i, resp in enumerate(hyp_responses):
-                results[i][f"{level}_raw_response"] = resp
-                parsed = _parse_hypothesis_payload(resp)
-                if parsed is None or "hypotheses" not in parsed:
-                    priors.append({"Unknown": 1.0})
-                    plans.append([])
-                else:
-                    raw_scores = _collect_scores(parsed["hypotheses"], level)
-                    if raw_scores:
-                        priors.append(_softmax_prior(raw_scores))
-                    else:
-                        priors.append({"Unknown": 1.0})
-                    plan = parsed.get("verification_plan", [])
-                    plans.append(plan)
-
-            # ── POMDP loop across all images simultaneously ─────────────────────
-            posteriors    = [dict(p) for p in priors]
-            pending       = [list(pl) for pl in plans]
-            steps         = [0] * n
-            ev_scores_all = [[] for _ in range(n)]
-
-            while True:
-                # find images still running
-                active = [
-                    i for i in range(n)
-                    if not self.pomdp.should_stop(
-                        posteriors[i], steps[i], level, len(pending[i]) == 0
+            # Replace: if country remains flat after verification, regenerate the
+            # country candidate set once with a prompt that asks for diverse but
+            # evidence-grounded candidates.
+            if level == "country" and COUNTRY_REPLACE_ATTEMPTS > 0:
+                unstable = [idx for idx in level_indices if not _stable_for_descent(posteriors_by_idx[idx])]
+                for _ in range(COUNTRY_REPLACE_ATTEMPTS):
+                    if not unstable:
+                        break
+                    replace_images = [images[i] for i in unstable]
+                    replace_contexts = [
+                        _replace_context(level, posteriors_by_idx[i], key_evidence[i])
+                        for i in unstable
+                    ]
+                    replace_key_evidence = [key_evidence[i] for i in unstable]
+                    repl_raw, repl_posts = self._run_level_batch(
+                        replace_images, level, replace_contexts, replace_key_evidence
                     )
-                ]
-                if not active:
-                    break
-
-                # ── Select actions for all active images (batch) ────────────────
-                policy_msgs = []
-                policy_idx  = []  # which active images need a policy call
-                task_choices = {}
-                for i in active:
-                    if len(pending[i]) == 1:
-                        task_choices[i] = 0
-                    else:
-                        policy_msgs.append(
-                            self.pomdp._make_policy_prompt(
-                                posteriors[i], pending[i], level, steps[i]
-                            )
-                        )
-                        policy_idx.append(i)
-
-                if policy_msgs:
-                    policy_resps = self.mllm.batch_generate(policy_msgs, max_new_tokens=POMDP_MAX_NEW_TOKENS)
-                    for i, resp in zip(policy_idx, policy_resps):
-                        match = __import__("re").search(r'"?task_index"?\s*:\s*(\d+)', resp)
-                        idx = int(match.group(1)) if match else 0
-                        task_choices[i] = min(idx, len(pending[i]) - 1)
-
-                tasks = {i: pending[i].pop(task_choices[i]) for i in active}
-
-                # ── Verify: batch call for all active images ────────────────────
-                verify_msgs = [
-                    _verify_prompt(images[i], tasks[i], list(posteriors[i].keys()), level)
-                    for i in active
-                ]
-                verify_resps = self.mllm.batch_generate(verify_msgs, max_new_tokens=VERIFY_MAX_NEW_TOKENS)
-                evidence_descs = {i: resp for i, resp in zip(active, verify_resps)}
-
-                # ── SL scoring: ONE big batch across all active images ──────────
-                sl_items = [
-                    (evidence_descs[i], list(posteriors[i].keys()))
-                    for i in active
-                ]
-                sl_results = self.sl.score_many(sl_items, level)
-
-                # ── DST fusion (CPU, per image) ────────────────────────────────
-                for k, i in enumerate(active):
-                    w_scores = sl_results[k]
-                    ev_scores_all[i].append(w_scores)
-                    posteriors[i] = self.dst.fuse(priors[i], ev_scores_all[i])
-
-                    max_w = max(w_scores.values(), default=1.0)
-                    if max_w > 1.5:
-                        key_evidence[i].append(evidence_descs[i][:120])
-
-                    steps[i] += 1
+                    for idx, raw, post in zip(unstable, repl_raw, repl_posts):
+                        raw_by_idx[idx] = raw
+                        posteriors_by_idx[idx] = post
+                        results[idx]["country_replaced"] = True
+                    unstable = [idx for idx in unstable if not _stable_for_descent(posteriors_by_idx[idx])]
 
             # ── Collect level results ───────────────────────────────────────────
-            for i in range(n):
-                best = max(posteriors[i], key=posteriors[i].get)
-                results[i][level] = best
-                results[i][f"{level}_posterior"] = posteriors[i]
+            for i in level_indices:
+                posterior = posteriors_by_idx[i]
+                results[i][f"{level}_raw_response"] = raw_by_idx[i]
 
-                if posteriors[i].get(best, 0) < 0.3 and level == "country":
-                    # no signal at country level — skip finer levels for this image
+                if level in ("city", "street"):
+                    filtered, conflicts = _filter_child_posterior(
+                        posterior, results[i].get("country_posterior", {})
+                    )
+                    if conflicts:
+                        results[i][f"{level}_backtrack_conflicts"] = conflicts[:5]
+                        posterior = filtered
+
+                best = max(posterior, key=posterior.get)
+                results[i][level] = best
+                results[i][f"{level}_posterior"] = posterior
+                results[i][f"{level}_stable"] = _stable_for_descent(posterior)
+
+                if level == "country" and (
+                    posterior.get(best, 0) < 0.3 or not _stable_for_descent(posterior)
+                ):
+                    # No reliable country distribution — avoid propagating a flat
+                    # parent into noisy child prompts.
                     for remaining in LEVELS[LEVELS.index(level) + 1:]:
                         results[i][remaining] = "Unknown"
                         results[i][f"{remaining}_posterior"] = {}
-
-            results_i_posterior = posteriors  # noqa: F841 — kept for debuggability
+                    skip_finer[i] = True
+                elif level == "city" and best == "Unknown":
+                    results[i]["street"] = "Unknown"
+                    results[i]["street_posterior"] = {}
+                    skip_finer[i] = True
 
         for i in range(n):
             final_level = next(

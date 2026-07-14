@@ -86,6 +86,11 @@ def analyze(records: list[dict]) -> dict:
     source_counts = Counter(r.get("geocode_source") or "missing" for r in records)
     consistency_counts = Counter(r.get("country_consistency") or "missing" for r in records)
     conflicts = [r for r in records if _country_conflicts(r)]
+    country_replaced = sum(1 for r in records if r.get("country_replaced"))
+    country_stable_known = [r for r in records if r.get("country_stable") is not None]
+    country_stable = sum(1 for r in country_stable_known if r.get("country_stable"))
+    city_backtrack = sum(1 for r in records if r.get("city_backtrack_conflicts"))
+    street_backtrack = sum(1 for r in records if r.get("street_backtrack_conflicts"))
 
     pred_continent_counts = Counter()
     pred_continent_correct = defaultdict(int)
@@ -139,6 +144,15 @@ def analyze(records: list[dict]) -> dict:
         "geocode_source": dict(source_counts),
         "country_consistency": dict(consistency_counts),
         "country_child_conflict_rate": round(100.0 * len(conflicts) / total, 2) if total else 0.0,
+        "country_replaced_rate": round(100.0 * country_replaced / total, 2) if total else 0.0,
+        "country_stable_rate": (
+            round(100.0 * country_stable / len(country_stable_known), 2)
+            if country_stable_known else None
+        ),
+        "backtrack_conflict_rate": {
+            "city": round(100.0 * city_backtrack / total, 2) if total else 0.0,
+            "street": round(100.0 * street_backtrack / total, 2) if total else 0.0,
+        },
         "predicted_continent_breakdown": {
             cont: {
                 "n": n,
@@ -188,6 +202,14 @@ def _print_report(report: dict) -> None:
     mass = report["country_top_mass"]
     print(f"Country posterior top mass: mean={mass['mean']} median={mass['median']}")
     print(f"Country-child conflict rate: {report['country_child_conflict_rate']:.2f}%")
+    print(f"Country replace rate: {report['country_replaced_rate']:.2f}%")
+    if report["country_stable_rate"] is not None:
+        print(f"Country stable rate: {report['country_stable_rate']:.2f}%")
+    backtrack = report["backtrack_conflict_rate"]
+    print(
+        "Backtrack conflict rate: "
+        f"city={backtrack['city']:.2f}% street={backtrack['street']:.2f}%"
+    )
 
     print("\nGeocode source")
     for key, value in sorted(report["geocode_source"].items()):

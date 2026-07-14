@@ -17,6 +17,16 @@ TRANSITION_THR  = 0.55   # τ_transition (lowered from 0.7: coarse levels rarely
 ENHANCE_THR     = 0.05   # τ_enhance  (ΔP threshold)
 BETA            = 0.693  # ln2
 
+# ── Hierarchical control (v9) ─────────────────────────────────────────────────
+# A level is considered stable for descent when either the top posterior is
+# strong, or it clears the transition threshold with enough top1-top2 margin / low
+# normalized entropy. This prevents flat country posteriors from blindly driving
+# city/street prompts.
+STRONG_POSTERIOR_THR = 0.70
+STABLE_MARGIN_THR    = 0.10
+STABLE_ENTROPY_THR   = 0.85
+COUNTRY_REPLACE_ATTEMPTS = 1
+
 # ── SL (single-source uncertainty) ────────────────────────────────────────────
 SL_N_SAMPLES    = 5      # samples per hypothesis for uncertainty estimation in SLModule
 SL_TEMPERATURE  = 0.8    # sampling temperature
