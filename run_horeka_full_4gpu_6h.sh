@@ -11,6 +11,7 @@
 #SBATCH --constraint=LSDF
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:4
 #SBATCH --mem=160G
@@ -79,7 +80,7 @@ nvidia-smi
 
 python geo_pipeline/evaluate.py \
   --batch_size 16 \
-  --out geo_pipeline/results/horeka_v9_1_full_4gpu.json
+  --out geo_pipeline/results/horeka_v10_delta_full_4gpu.json
 
 python geo_pipeline/analyze_results.py \
-  --pred geo_pipeline/results/horeka_v9_1_full_4gpu.json
+  --pred geo_pipeline/results/horeka_v10_delta_full_4gpu.json
