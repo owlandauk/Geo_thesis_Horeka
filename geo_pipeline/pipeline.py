@@ -174,11 +174,11 @@ def _allow_guarded_descent(posterior: dict[str, float]) -> bool:
 
 
 def _should_replace_country(posterior: dict[str, float]) -> bool:
-    """Replace only when country belief is genuinely weak or nearly tied."""
+    """Replace only when country belief is both weak and nearly tied."""
     stats = _posterior_stats(posterior)
     return (
         stats["top"] < COUNTRY_REPLACE_TOP_THR
-        or stats["margin"] < COUNTRY_REPLACE_MARGIN_THR
+        and stats["margin"] < COUNTRY_REPLACE_MARGIN_THR
     )
 
 
@@ -579,7 +579,7 @@ class GeoPipeline:
             }
 
             # Replace: only regenerate the country candidate set when belief is
-            # genuinely weak or nearly tied. Marginally unstable but plausible
+            # genuinely weak and nearly tied. Marginally unstable but plausible
             # country distributions are allowed to descend with child filtering.
             if level == "country" and COUNTRY_REPLACE_ATTEMPTS > 0:
                 unstable = [idx for idx in level_indices if _should_replace_country(posteriors_by_idx[idx])]
