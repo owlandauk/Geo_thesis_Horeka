@@ -48,6 +48,12 @@ ENV_DIR=/hkfs/work/workspace/scratch/tj3409-SichengZuo/envs/geo-vllm
 cd "${REPO_DIR}"
 mkdir -p geo_pipeline/results
 
+JOB_TMP_DIR="${REPO_DIR}/.tmp/slurm_${SLURM_JOB_ID:-manual}"
+mkdir -p "${JOB_TMP_DIR}"
+export TMPDIR="${JOB_TMP_DIR}"
+export TMP="${JOB_TMP_DIR}"
+export TEMP="${JOB_TMP_DIR}"
+
 eval "$(~/miniconda3/bin/conda shell.bash hook)"
 conda activate "${ENV_DIR}"
 
@@ -63,6 +69,7 @@ echo "Node: $(hostname)"
 echo "Start: ${START_HUMAN}"
 echo "Repo: ${REPO_DIR}"
 echo "Env: ${ENV_DIR}"
+echo "TMPDIR: ${TMPDIR}"
 echo "MODEL_PATH: ${MODEL_PATH}"
 echo "YFCC4K_IMG_DIR: ${YFCC4K_IMG_DIR}"
 echo "YFCC4K_GPS_CSV: ${YFCC4K_GPS_CSV}"
