@@ -253,24 +253,32 @@ def _country_candidate_set(country_posterior: dict[str, float], k: int = 3) -> s
     }
 
 
-def _child_country_conflict(location: str, country_posterior: dict[str, float]) -> bool:
+def _child_country_conflict(
+    location: str,
+    country_posterior: dict[str, float],
+    pred_country: str | None = None,
+) -> bool:
     child_country = canonicalize_country(location or "")
     if not child_country:
         return False
+    parent_country = canonicalize_country(pred_country or "")
+    if parent_country:
+        return child_country != parent_country
     return child_country not in _country_candidate_set(country_posterior)
 
 
 def _filter_child_posterior(
     posterior: dict[str, float],
     country_posterior: dict[str, float],
+    pred_country: str | None = None,
 ) -> tuple[dict[str, float], list[str]]:
-    """Drop child hypotheses that name countries outside top country candidates."""
+    """Drop child hypotheses that explicitly contradict the parent country."""
     if not posterior:
         return posterior, []
     kept = {}
     conflicts = []
     for loc, prob in posterior.items():
-        if _child_country_conflict(loc, country_posterior):
+        if _child_country_conflict(loc, country_posterior, pred_country):
             conflicts.append(loc)
         else:
             kept[loc] = prob
@@ -536,7 +544,9 @@ class GeoPipeline:
 
             if level in ("city", "street"):
                 filtered, conflicts = _filter_child_posterior(
-                    posterior, result.get("country_posterior", {})
+                    posterior,
+                    result.get("country_posterior", {}),
+                    result.get("country"),
                 )
                 if conflicts:
                     result[f"{level}_backtrack_conflicts"] = conflicts[:5]
@@ -752,7 +762,9 @@ class GeoPipeline:
 
                 if level in ("city", "street"):
                     filtered, conflicts = _filter_child_posterior(
-                        posterior, results[i].get("country_posterior", {})
+                        posterior,
+                        results[i].get("country_posterior", {}),
+                        results[i].get("country"),
                     )
                     if conflicts:
                         results[i][f"{level}_backtrack_conflicts"] = conflicts[:5]

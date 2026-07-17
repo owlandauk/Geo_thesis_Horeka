@@ -76,14 +76,16 @@ def _geocode_level(
     level: str,
     country: str | None,
     strict_child_geocode: bool = False,
+    allow_bare_city_geocode: bool = False,
 ):
     """Geocode one prediction level and return coords plus diagnostic source.
 
     Nominatim's gazetteer is ambiguous for many city/street names (a dozen
     "Springfield"s, two "Naples", etc.). When the predicted country is
     available, qualifying street/city queries first shrinks the search space.
-    Bare child fallback remains the default so street/city metrics stay
-    comparable with earlier runs; strict mode disables it for ablations.
+    Bare street fallback remains enabled because it is often informative.
+    Bare city fallback is opt-in because broad city names were a weak source in
+    v8 diagnostics; strict mode disables all unqualified child fallback.
     """
     if level in ("street", "city"):
         country_ok = bool(country and country.lower() not in ("unknown", ""))
@@ -98,6 +100,8 @@ def _geocode_level(
                 return coords, f"{level}_country_qualified", "country_qualified"
 
         if strict_child_geocode and not name_has_country:
+            return None, None, "failed"
+        if level == "city" and not name_has_country and not allow_bare_city_geocode:
             return None, None, "failed"
 
         coords = geocode(name)
@@ -188,7 +192,11 @@ def evaluate(args):
                 if name and name != "Unknown":
                     qualifier = pred_country if level in ("street", "city") else None
                     pred_coords, geocode_source, country_consistency = _geocode_level(
-                        name, level, qualifier, args.strict_child_geocode
+                        name,
+                        level,
+                        qualifier,
+                        args.strict_child_geocode,
+                        args.allow_bare_city_geocode,
                     )
                     if pred_coords:
                         break
@@ -277,5 +285,10 @@ if __name__ == "__main__":
         "--strict_child_geocode",
         action="store_true",
         help="Disable unqualified street/city Nominatim matches for strict consistency ablations.",
+    )
+    parser.add_argument(
+        "--allow_bare_city_geocode",
+        action="store_true",
+        help="Allow unqualified city Nominatim matches; default keeps only bare street fallback.",
     )
     evaluate(parser.parse_args())
