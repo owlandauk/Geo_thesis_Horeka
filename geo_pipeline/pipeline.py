@@ -31,12 +31,15 @@ from config import (
     STRONG_POSTERIOR_THR, STABLE_MARGIN_THR, STABLE_ENTROPY_THR,
     GUARDED_DESCENT_THR, COUNTRY_REPLACE_TOP_THR,
     COUNTRY_REPLACE_MARGIN_THR, COUNTRY_REPLACE_ATTEMPTS,
-    WEB_SEARCH_TOP_THR, WEB_SEARCH_MARGIN_THR,
+    WEB_SEARCH_TOP_THR, WEB_SEARCH_MARGIN_THR, WEB_SEARCH_REQUIRE_ENTITY,
 )
 
 LEVELS = ["country", "city", "street"]
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_SEARCH_ENTITY_RE = re.compile(
+    r"\b(?:[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,}|[A-Z]{2,}|[A-Z]?\d[A-Z0-9 -]{2,})\b"
+)
 
 
 def _try_parse_json(text: str):
@@ -171,8 +174,20 @@ def _stable_for_descent(posterior: dict[str, float]) -> bool:
 
 
 def _allow_guarded_descent(posterior: dict[str, float]) -> bool:
-    """Allow child reasoning with conflict filtering when country is plausible."""
-    return _posterior_stats(posterior)["top"] >= GUARDED_DESCENT_THR
+    """Allow child reasoning only when country belief is both plausible and stable."""
+    stats = _posterior_stats(posterior)
+    return stats["top"] >= GUARDED_DESCENT_THR and _stable_for_descent(posterior)
+
+
+def _descent_block_reason(posterior: dict[str, float]) -> str | None:
+    stats = _posterior_stats(posterior)
+    if stats["top"] < 0.3:
+        return "very_low_country_confidence"
+    if stats["top"] < GUARDED_DESCENT_THR:
+        return "weak_country_top_mass"
+    if not _stable_for_descent(posterior):
+        return "unstable_country_posterior"
+    return None
 
 
 def _should_replace_country(posterior: dict[str, float]) -> bool:
@@ -198,6 +213,18 @@ def _should_web_enhance_country(posterior: dict[str, float], visual_delta: float
         and stats["top"] < WEB_SEARCH_TOP_THR
         and stats["margin"] < WEB_SEARCH_MARGIN_THR
     )
+
+
+def _has_searchable_web_entity(key_evidence: list[str]) -> bool:
+    """Only search when visual evidence contains text, names, or code-like clues."""
+    if not WEB_SEARCH_REQUIRE_ENTITY:
+        return True
+    recent = " ".join(key_evidence[-3:])
+    if not recent.strip():
+        return False
+    if any(marker in recent.lower() for marker in ("sign", "text", "logo", "license", "plate")):
+        return True
+    return bool(_SEARCH_ENTITY_RE.search(recent))
 
 
 def _build_web_search_query(posterior: dict[str, float], key_evidence: list[str]) -> str:
@@ -265,10 +292,11 @@ def _replace_context(level: str, posterior: dict[str, float], key_evidence: list
         "Previous country candidates remained unstable after verification. "
         f"Top candidates were {_format_top_candidates(posterior, 5)}; "
         f"top={stats['top']:.2f}, margin={stats['margin']:.2f}, entropy={stats['entropy']:.2f}. "
-        "Re-analyze from scratch and return a diverse country candidate set. "
-        "Avoid defaulting to any country from weak generic cues, but do not over-correct away from North America: "
-        "United States, Canada, and Mexico remain valid when road signs, traffic infrastructure, license plates, "
-        "landmarks, vegetation, or architecture clearly support them. "
+        "Re-analyze from scratch and return a diverse country candidate set across continents when ambiguous. "
+        "Do not choose United States, Canada, or Mexico from weak generic cues such as English text, wide roads, "
+        "suburban houses, product branding, online media, forests, mountains, or beaches. North America is valid "
+        "only when concrete local evidence supports it: road shields, traffic infrastructure, license plates, "
+        "visible addresses, distinctive landmarks, or region-specific built environment. "
         f"Previous useful clues: {clues}"
     )
 
@@ -279,8 +307,8 @@ def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str
         countries = _format_top_candidates(result.get("country_posterior", {}))
         return (
             f"Country candidates: {countries}. "
-            "Hypothesize cities within these candidate countries. Do not introduce a city "
-            "from a different country unless visible text or a landmark directly names it. "
+            "Hypothesize cities within these candidate countries. Do not introduce a city or region "
+            "from a different country unless visible text, an address, or a landmark directly names it. "
             "If the country remains ambiguous, keep alternatives within the listed candidates. "
             f"Key clues: {clues}"
         )
@@ -290,7 +318,8 @@ def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str
         return (
             f"Country candidates: {countries}. City candidates: {cities}. "
             "Refine within these city/country candidates. Return a street, district, or landmark; "
-            "do not append a different country unless directly visible in the image. "
+            "do not append a different country unless directly visible in the image. If no reliable "
+            "street-level evidence exists, return Unknown instead of a famous but unsupported place. "
             f"Key clues: {clues}"
         )
     return ""
@@ -313,10 +342,13 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                     f"You are a geolocation expert. {level_hint}\n"
                     "Return 3-5 plausible hypotheses when the image is ambiguous. "
                     "For country-level reasoning, return country names only, not continents or regions. "
-                    "Do not default to any country from weak generic cues. English text, generic roads, "
-                    "vegetation, architecture, online media, or product branding alone are not enough for "
-                    "United States or Canada; however North America is valid when concrete road signs, "
-                    "traffic infrastructure, license plates, landmarks, vegetation, or architecture support it. "
+                    "For country-level reasoning, if evidence is weak or generic, keep candidates spread across "
+                    "plausible continents instead of clustering around one default region. Do not default to any "
+                    "country from weak generic cues. English text, generic roads, suburban houses, vegetation, "
+                    "mountains, beaches, architecture, online media, or product branding alone are not enough for "
+                    "United States, Canada, or Mexico. North America is valid only when concrete local clues support "
+                    "it: road shields, traffic infrastructure, license plates, visible addresses, distinctive "
+                    "landmarks, or region-specific built environment. "
                     "Assign high confidence only when there are explicit local clues. "
                     + (f"Prior context: {context}\n" if context else "")
                     + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
@@ -445,6 +477,8 @@ class GeoPipeline:
         """Use optional web search snippets to re-run ambiguous country inference."""
         if not _should_web_enhance_country(posterior, visual_delta):
             return None
+        if not _has_searchable_web_entity(key_evidence):
+            return None
 
         query = _build_web_search_query(posterior, key_evidence)
         search_data = self.web_search.search(query)
@@ -516,12 +550,10 @@ class GeoPipeline:
             result[f"{level}_posterior"] = posterior
             result[f"{level}_stable"] = _stable_for_descent(posterior)
 
-            # stop early if confidence is very low (model has no signal)
-            if posterior.get(best, 0) < 0.3 and level == "country":
-                break
-            if level == "country" and not _allow_guarded_descent(posterior):
+            if level == "country" and (block_reason := _descent_block_reason(posterior)):
                 # Even guarded descent would be too noisy. Avoid propagating a
                 # very weak parent posterior into child prompts.
+                result["country_descent_blocked_reason"] = block_reason
                 for remaining in LEVELS[LEVELS.index(level) + 1:]:
                     result[remaining] = "Unknown"
                     result[f"{remaining}_posterior"] = {}
@@ -737,11 +769,10 @@ class GeoPipeline:
                 if level == "country":
                     results[i]["country_visual_delta"] = visual_delta_by_idx.get(i, 0.0)
 
-                if level == "country" and (
-                    posterior.get(best, 0) < 0.3 or not _allow_guarded_descent(posterior)
-                ):
+                if level == "country" and (block_reason := _descent_block_reason(posterior)):
                     # Even guarded descent would be too noisy. Avoid propagating a
                     # very weak parent into child prompts.
+                    results[i]["country_descent_blocked_reason"] = block_reason
                     for remaining in LEVELS[LEVELS.index(level) + 1:]:
                         results[i][remaining] = "Unknown"
                         results[i][f"{remaining}_posterior"] = {}

@@ -72,6 +72,44 @@ def _record_gt_continent(record: dict) -> str | None:
     )
 
 
+def _accuracy_by_threshold(records: list[dict]) -> dict:
+    n = len(records)
+    if not n:
+        return {str(thr): 0.0 for thr in EVAL_THRESHOLDS}
+    return {
+        str(thr): round(
+            100.0
+            * sum(float(r.get("dist_km", float("inf"))) <= thr for r in records)
+            / n,
+            2,
+        )
+        for thr in EVAL_THRESHOLDS
+    }
+
+
+def _bucket_accuracy(records: list[dict], key_fn) -> dict:
+    buckets = defaultdict(list)
+    for record in records:
+        buckets[key_fn(record)].append(record)
+    return {
+        str(key): {"n": len(items), "accuracy": _accuracy_by_threshold(items)}
+        for key, items in sorted(buckets.items(), key=lambda kv: str(kv[0]))
+    }
+
+
+def _mass_bucket(record: dict) -> str:
+    mass = _top_mass(record)
+    if mass is None:
+        return "missing"
+    if mass < 0.45:
+        return "<0.45"
+    if mass < 0.55:
+        return "0.45-0.55"
+    if mass < 0.65:
+        return "0.55-0.65"
+    return ">=0.65"
+
+
 def analyze(records: list[dict]) -> dict:
     total = len(records)
     correct = {thr: 0 for thr in EVAL_THRESHOLDS}
@@ -100,6 +138,10 @@ def analyze(records: list[dict]) -> dict:
     country_stable = sum(1 for r in country_stable_known if r.get("country_stable"))
     city_backtrack = sum(1 for r in records if r.get("city_backtrack_conflicts"))
     street_backtrack = sum(1 for r in records if r.get("street_backtrack_conflicts"))
+    descent_blocked = [r for r in records if r.get("country_descent_blocked_reason")]
+    descent_block_reasons = Counter(
+        r.get("country_descent_blocked_reason") for r in descent_blocked
+    )
 
     pred_continent_counts = Counter()
     pred_continent_correct = defaultdict(int)
@@ -171,6 +213,19 @@ def analyze(records: list[dict]) -> dict:
             "city": round(100.0 * city_backtrack / total, 2) if total else 0.0,
             "street": round(100.0 * street_backtrack / total, 2) if total else 0.0,
         },
+        "country_descent_blocked_rate": round(100.0 * len(descent_blocked) / total, 2) if total else 0.0,
+        "country_descent_blocked_reasons": dict(descent_block_reasons),
+        "diagnostic_buckets": {
+            "country_top_mass": _bucket_accuracy(records, _mass_bucket),
+            "country_stable": _bucket_accuracy(records, lambda r: r.get("country_stable")),
+            "geocode_source": _bucket_accuracy(records, lambda r: r.get("geocode_source") or "missing"),
+            "country_web_enhanced": _bucket_accuracy(records, lambda r: bool(r.get("country_web_enhanced"))),
+            "country_replaced": _bucket_accuracy(records, lambda r: bool(r.get("country_replaced"))),
+            "country_descent_blocked_reason": _bucket_accuracy(
+                records,
+                lambda r: r.get("country_descent_blocked_reason") or "not_blocked",
+            ),
+        },
         "predicted_continent_breakdown": {
             cont: {
                 "n": n,
@@ -241,6 +296,11 @@ def _print_report(report: dict) -> None:
         "Backtrack conflict rate: "
         f"city={backtrack['city']:.2f}% street={backtrack['street']:.2f}%"
     )
+    print(f"Country descent blocked rate: {report['country_descent_blocked_rate']:.2f}%")
+    if report["country_descent_blocked_reasons"]:
+        print("Country descent blocked reasons")
+        for key, value in sorted(report["country_descent_blocked_reasons"].items()):
+            print(f"  {key}: {value}")
 
     print("\nGeocode source")
     for key, value in sorted(report["geocode_source"].items()):
@@ -275,6 +335,21 @@ def _print_report(report: dict) -> None:
         print("  by predicted country: " + ", ".join(
             f"{k}:{v}" for k, v in na_fp["by_pred_country"].items()
         ))
+
+    buckets = report.get("diagnostic_buckets", {})
+    if buckets:
+        print("\nDiagnostic buckets (Country <750km / Continent <2500km)")
+        for bucket_name in ("country_top_mass", "geocode_source", "country_descent_blocked_reason"):
+            bucket = buckets.get(bucket_name, {})
+            if not bucket:
+                continue
+            print(f"  {bucket_name}")
+            for key, stats in bucket.items():
+                acc = stats["accuracy"]
+                print(
+                    f"    {key}: n={stats['n']} "
+                    f"country={acc.get('750', 0.0):.2f}% continent={acc.get('2500', 0.0):.2f}%"
+                )
 
 
 def main() -> None:

@@ -24,8 +24,8 @@ BETA            = 0.693  # ln2
 # city/street prompts.
 STRONG_POSTERIOR_THR = 0.60
 STABLE_MARGIN_THR    = 0.04
-STABLE_ENTROPY_THR   = 0.98
-GUARDED_DESCENT_THR  = 0.40
+STABLE_ENTROPY_THR   = 0.96
+GUARDED_DESCENT_THR  = 0.50
 COUNTRY_REPLACE_TOP_THR    = 0.45
 COUNTRY_REPLACE_MARGIN_THR = 0.02
 COUNTRY_REPLACE_ATTEMPTS = 1
@@ -36,6 +36,7 @@ WEB_SEARCH_TOP_THR = 0.60
 WEB_SEARCH_MARGIN_THR = ENHANCE_THR
 WEB_SEARCH_MAX_RESULTS = 3
 WEB_SEARCH_TIMEOUT = 8
+WEB_SEARCH_REQUIRE_ENTITY = True
 
 # ── SL (single-source uncertainty) ────────────────────────────────────────────
 SL_N_SAMPLES    = 5      # samples per hypothesis for uncertainty estimation in SLModule
