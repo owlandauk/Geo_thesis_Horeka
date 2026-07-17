@@ -16,8 +16,9 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem=100G
 #SBATCH --time=12:00:00
-#SBATCH --output=geo_pipeline/results/horeka_v9_limit200_2gpu_%j.out
-#SBATCH --error=geo_pipeline/results/horeka_v9_limit200_2gpu_%j.err
+#SBATCH --chdir=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation
+#SBATCH --output=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_v9_limit200_2gpu_%j.out
+#SBATCH --error=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_v9_limit200_2gpu_%j.err
 
 set -euo pipefail
 
