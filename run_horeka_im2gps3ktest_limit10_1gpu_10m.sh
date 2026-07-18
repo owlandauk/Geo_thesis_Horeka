@@ -69,8 +69,8 @@ conda activate "${ENV_DIR}"
 export MLLM_BACKEND=vllm
 export VLLM_TP=1
 export MODEL_PATH=/hkfs/work/workspace/scratch/tj3409-SichengZuo/models/qwen2.5-vl-7b
-export IM2GPS3KTEST_IMG_DIR="${IM2GPS3KTEST_IMG_DIR:-/hkfs/work/workspace/scratch/tj3409-SichengZuo/Dataset/im2gps3ktest/im2gps3ktest}"
-export IM2GPS3KTEST_GPS_CSV="${IM2GPS3KTEST_GPS_CSV:-/hkfs/work/workspace/scratch/tj3409-SichengZuo/Dataset/im2gps3ktest/im2gps3ktest_gps.csv}"
+export IM2GPS3KTEST_IMG_DIR="${IM2GPS3KTEST_IMG_DIR:-/hkfs/work/workspace/scratch/tj3409-SichengZuo/Dataset/im2gps3ktest}"
+export IM2GPS3KTEST_GPS_CSV="${IM2GPS3KTEST_GPS_CSV:-/hkfs/work/workspace/scratch/tj3409-SichengZuo/Dataset/im2gps3ktest/im2gps3k_places365.csv}"
 export VLLM_GPU_MEMORY_UTILIZATION=0.80
 
 echo "Job ID: ${SLURM_JOB_ID:-unknown}"
