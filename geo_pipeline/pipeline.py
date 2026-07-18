@@ -32,7 +32,6 @@ from config import (
     GUARDED_DESCENT_THR, COUNTRY_REPLACE_TOP_THR,
     COUNTRY_REPLACE_MARGIN_THR, COUNTRY_REPLACE_ATTEMPTS,
     WEB_SEARCH_TOP_THR, WEB_SEARCH_MARGIN_THR, WEB_SEARCH_REQUIRE_ENTITY,
-    CHILD_CONFLICT_PENALTY,
 )
 
 LEVELS = ["country", "city", "street"]
@@ -261,25 +260,26 @@ def _child_country_conflict(location: str, country_posterior: dict[str, float]) 
     return child_country not in _country_candidate_set(country_posterior)
 
 
-def _soft_adjust_child_posterior(
+def _filter_child_posterior(
     posterior: dict[str, float],
     country_posterior: dict[str, float],
 ) -> tuple[dict[str, float], list[str]]:
-    """Downweight child hypotheses that name countries outside top candidates."""
+    """Remove child hypotheses that explicitly contradict country top-3."""
     if not posterior:
         return posterior, []
-    adjusted = {}
+    filtered = {}
     conflicts = []
     for loc, prob in posterior.items():
         if _child_country_conflict(loc, country_posterior):
             conflicts.append(loc)
-            adjusted[loc] = prob * CHILD_CONFLICT_PENALTY
         else:
-            adjusted[loc] = prob
+            filtered[loc] = prob
     if not conflicts:
         return posterior, []
-    total = sum(adjusted.values())
-    return ({k: v / total for k, v in adjusted.items()} if total > 0 else adjusted), conflicts
+    if not filtered:
+        return posterior, conflicts
+    total = sum(filtered.values())
+    return ({k: v / total for k, v in filtered.items()} if total > 0 else filtered), conflicts
 
 
 def _replace_context(level: str, posterior: dict[str, float], key_evidence: list[str]) -> str:
@@ -290,10 +290,9 @@ def _replace_context(level: str, posterior: dict[str, float], key_evidence: list
         f"Top candidates were {_format_top_candidates(posterior, 5)}; "
         f"top={stats['top']:.2f}, margin={stats['margin']:.2f}, entropy={stats['entropy']:.2f}. "
         "Re-analyze from scratch and return a diverse country candidate set across continents when ambiguous. "
-        "Do not choose United States, Canada, or Mexico from weak generic cues such as English text, wide roads, "
-        "suburban houses, product branding, online media, forests, mountains, or beaches. North America is valid "
-        "only when concrete local evidence supports it: road shields, traffic infrastructure, license plates, "
-        "visible addresses, distinctive landmarks, or region-specific built environment. "
+        "Do not infer United States or Canada from English text, generic roads, suburban houses, vegetation, "
+        "or product branding alone. When evidence is weak, keep non-North-American alternatives plausible. "
+        "United States, Canada, and Mexico remain valid when concrete local evidence supports them. "
         f"Previous useful clues: {clues}"
     )
 
@@ -342,10 +341,9 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                     "For country-level reasoning, if evidence is weak or generic, keep candidates spread across "
                     "plausible continents instead of clustering around one default region. Do not default to any "
                     "country from weak generic cues. English text, generic roads, suburban houses, vegetation, "
-                    "mountains, beaches, architecture, online media, or product branding alone are not enough for "
-                    "United States, Canada, or Mexico. North America is valid only when concrete local clues support "
-                    "it: road shields, traffic infrastructure, license plates, visible addresses, distinctive "
-                    "landmarks, or region-specific built environment. "
+                    "mountains, beaches, architecture, online media, or product branding alone are not enough to "
+                    "infer United States or Canada. When evidence is weak, keep non-North-American alternatives "
+                    "plausible. United States, Canada, and Mexico remain valid when concrete local evidence supports them. "
                     "Assign high confidence only when there are explicit local clues. "
                     + (f"Prior context: {context}\n" if context else "")
                     + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
@@ -535,12 +533,12 @@ class GeoPipeline:
                     result[f"{level}_raw_response"] = raw_resp
 
             if level in ("city", "street"):
-                adjusted, conflicts = _soft_adjust_child_posterior(
+                filtered, conflicts = _filter_child_posterior(
                     posterior, result.get("country_posterior", {})
                 )
                 if conflicts:
-                    result[f"{level}_soft_conflicts"] = conflicts[:5]
-                    posterior = adjusted
+                    result[f"{level}_backtrack_conflicts"] = conflicts[:5]
+                    posterior = filtered
 
             best = max(posterior, key=posterior.get)
             result[level] = best
@@ -751,12 +749,12 @@ class GeoPipeline:
                 results[i][f"{level}_raw_response"] = raw_by_idx[i]
 
                 if level in ("city", "street"):
-                    adjusted, conflicts = _soft_adjust_child_posterior(
+                    filtered, conflicts = _filter_child_posterior(
                         posterior, results[i].get("country_posterior", {})
                     )
                     if conflicts:
-                        results[i][f"{level}_soft_conflicts"] = conflicts[:5]
-                        posterior = adjusted
+                        results[i][f"{level}_backtrack_conflicts"] = conflicts[:5]
+                        posterior = filtered
 
                 best = max(posterior, key=posterior.get)
                 results[i][level] = best

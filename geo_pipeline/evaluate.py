@@ -238,8 +238,6 @@ def evaluate(args):
                 "country_descent_blocked_reason": pred.get("country_descent_blocked_reason"),
                 "city_backtrack_conflicts": pred.get("city_backtrack_conflicts", []),
                 "street_backtrack_conflicts": pred.get("street_backtrack_conflicts", []),
-                "city_soft_conflicts": pred.get("city_soft_conflicts", []),
-                "street_soft_conflicts": pred.get("street_soft_conflicts", []),
                 "raw_country_response": pred.get("country_raw_response"),
                 "raw_city_response":    pred.get("city_raw_response"),
                 "raw_street_response":  pred.get("street_raw_response"),
