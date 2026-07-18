@@ -32,6 +32,7 @@ from config import (
     GUARDED_DESCENT_THR, COUNTRY_REPLACE_TOP_THR,
     COUNTRY_REPLACE_MARGIN_THR, COUNTRY_REPLACE_ATTEMPTS,
     WEB_SEARCH_TOP_THR, WEB_SEARCH_MARGIN_THR, WEB_SEARCH_REQUIRE_ENTITY,
+    CHILD_CONFLICT_PENALTY,
 )
 
 LEVELS = ["country", "city", "street"]
@@ -253,41 +254,32 @@ def _country_candidate_set(country_posterior: dict[str, float], k: int = 3) -> s
     }
 
 
-def _child_country_conflict(
-    location: str,
-    country_posterior: dict[str, float],
-    pred_country: str | None = None,
-) -> bool:
+def _child_country_conflict(location: str, country_posterior: dict[str, float]) -> bool:
     child_country = canonicalize_country(location or "")
     if not child_country:
         return False
-    parent_country = canonicalize_country(pred_country or "")
-    if parent_country:
-        return child_country != parent_country
     return child_country not in _country_candidate_set(country_posterior)
 
 
-def _filter_child_posterior(
+def _soft_adjust_child_posterior(
     posterior: dict[str, float],
     country_posterior: dict[str, float],
-    pred_country: str | None = None,
 ) -> tuple[dict[str, float], list[str]]:
-    """Drop child hypotheses that explicitly contradict the parent country."""
+    """Downweight child hypotheses that name countries outside top candidates."""
     if not posterior:
         return posterior, []
-    kept = {}
+    adjusted = {}
     conflicts = []
     for loc, prob in posterior.items():
-        if _child_country_conflict(loc, country_posterior, pred_country):
+        if _child_country_conflict(loc, country_posterior):
             conflicts.append(loc)
+            adjusted[loc] = prob * CHILD_CONFLICT_PENALTY
         else:
-            kept[loc] = prob
+            adjusted[loc] = prob
     if not conflicts:
         return posterior, []
-    if not kept:
-        return {"Unknown": 1.0}, conflicts
-    total = sum(kept.values())
-    return ({k: v / total for k, v in kept.items()} if total > 0 else kept), conflicts
+    total = sum(adjusted.values())
+    return ({k: v / total for k, v in adjusted.items()} if total > 0 else adjusted), conflicts
 
 
 def _replace_context(level: str, posterior: dict[str, float], key_evidence: list[str]) -> str:
@@ -543,14 +535,12 @@ class GeoPipeline:
                     result[f"{level}_raw_response"] = raw_resp
 
             if level in ("city", "street"):
-                filtered, conflicts = _filter_child_posterior(
-                    posterior,
-                    result.get("country_posterior", {}),
-                    result.get("country"),
+                adjusted, conflicts = _soft_adjust_child_posterior(
+                    posterior, result.get("country_posterior", {})
                 )
                 if conflicts:
-                    result[f"{level}_backtrack_conflicts"] = conflicts[:5]
-                    posterior = filtered
+                    result[f"{level}_soft_conflicts"] = conflicts[:5]
+                    posterior = adjusted
 
             best = max(posterior, key=posterior.get)
             result[level] = best
@@ -761,14 +751,12 @@ class GeoPipeline:
                 results[i][f"{level}_raw_response"] = raw_by_idx[i]
 
                 if level in ("city", "street"):
-                    filtered, conflicts = _filter_child_posterior(
-                        posterior,
-                        results[i].get("country_posterior", {}),
-                        results[i].get("country"),
+                    adjusted, conflicts = _soft_adjust_child_posterior(
+                        posterior, results[i].get("country_posterior", {})
                     )
                     if conflicts:
-                        results[i][f"{level}_backtrack_conflicts"] = conflicts[:5]
-                        posterior = filtered
+                        results[i][f"{level}_soft_conflicts"] = conflicts[:5]
+                        posterior = adjusted
 
                 best = max(posterior, key=posterior.get)
                 results[i][level] = best

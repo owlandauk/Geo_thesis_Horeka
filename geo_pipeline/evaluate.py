@@ -76,16 +76,15 @@ def _geocode_level(
     level: str,
     country: str | None,
     strict_child_geocode: bool = False,
-    allow_bare_city_geocode: bool = False,
+    allow_bare_city_geocode: bool = True,
 ):
     """Geocode one prediction level and return coords plus diagnostic source.
 
     Nominatim's gazetteer is ambiguous for many city/street names (a dozen
     "Springfield"s, two "Naples", etc.). When the predicted country is
     available, qualifying street/city queries first shrinks the search space.
-    Bare street fallback remains enabled because it is often informative.
-    Bare city fallback is opt-in because broad city names were a weak source in
-    v8 diagnostics; strict mode disables all unqualified child fallback.
+    Bare street/city fallback remains enabled by default for comparability with
+    v5/v6; strict mode disables all unqualified child fallback.
     """
     if level in ("street", "city"):
         country_ok = bool(country and country.lower() not in ("unknown", ""))
@@ -239,6 +238,8 @@ def evaluate(args):
                 "country_descent_blocked_reason": pred.get("country_descent_blocked_reason"),
                 "city_backtrack_conflicts": pred.get("city_backtrack_conflicts", []),
                 "street_backtrack_conflicts": pred.get("street_backtrack_conflicts", []),
+                "city_soft_conflicts": pred.get("city_soft_conflicts", []),
+                "street_soft_conflicts": pred.get("street_soft_conflicts", []),
                 "raw_country_response": pred.get("country_raw_response"),
                 "raw_city_response":    pred.get("city_raw_response"),
                 "raw_street_response":  pred.get("street_raw_response"),
@@ -289,6 +290,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--allow_bare_city_geocode",
         action="store_true",
-        help="Allow unqualified city Nominatim matches; default keeps only bare street fallback.",
+        default=True,
+        help="Allow unqualified city Nominatim matches; enabled by default for v5 comparability.",
+    )
+    parser.add_argument(
+        "--disable_bare_city_geocode",
+        action="store_false",
+        dest="allow_bare_city_geocode",
+        help="Disable unqualified city Nominatim matches for ablations.",
     )
     evaluate(parser.parse_args())
