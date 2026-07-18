@@ -138,6 +138,10 @@ def analyze(records: list[dict]) -> dict:
     country_stable = sum(1 for r in country_stable_known if r.get("country_stable"))
     city_backtrack = sum(1 for r in records if r.get("city_backtrack_conflicts"))
     street_backtrack = sum(1 for r in records if r.get("street_backtrack_conflicts"))
+    has_soft_conflict_fields = any(
+        "city_soft_conflicts" in r or "street_soft_conflicts" in r
+        for r in records
+    )
     city_soft_conflict = sum(1 for r in records if r.get("city_soft_conflicts"))
     street_soft_conflict = sum(1 for r in records if r.get("street_soft_conflicts"))
     descent_blocked = [r for r in records if r.get("country_descent_blocked_reason")]
@@ -215,10 +219,10 @@ def analyze(records: list[dict]) -> dict:
             "city": round(100.0 * city_backtrack / total, 2) if total else 0.0,
             "street": round(100.0 * street_backtrack / total, 2) if total else 0.0,
         },
-        "soft_conflict_rate": {
+        "soft_conflict_rate": ({
             "city": round(100.0 * city_soft_conflict / total, 2) if total else 0.0,
             "street": round(100.0 * street_soft_conflict / total, 2) if total else 0.0,
-        },
+        } if has_soft_conflict_fields else None),
         "country_descent_blocked_rate": round(100.0 * len(descent_blocked) / total, 2) if total else 0.0,
         "country_descent_blocked_reasons": dict(descent_block_reasons),
         "diagnostic_buckets": {
