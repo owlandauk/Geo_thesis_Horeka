@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import signal
 import time
 from pathlib import Path
 from tqdm import tqdm
@@ -154,6 +155,30 @@ def evaluate(args):
     records = []
     correct = {thr: 0 for thr in EVAL_THRESHOLDS}
     total   = 0
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    def save_results(status: str):
+        with open(out, "w") as f:
+            json.dump({
+                "summary": {str(k): round(100 * v / total, 2) if total else 0
+                            for k, v in correct.items()},
+                "total": total,
+                "start": start,
+                "end": start + total - 1 if total else start - 1,
+                "requested_end": end - 1,
+                "status": status,
+                "records": records,
+            }, f, indent=2)
+        print(f"\nSaved {status} results to {out} ({total} records)", flush=True)
+
+    def handle_termination(signum, _frame):
+        print(f"\n[WARN] received signal {signum}; saving partial results", flush=True)
+        save_results("interrupted")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, handle_termination)
+    signal.signal(signal.SIGINT, handle_termination)
 
     for batch_start in tqdm(range(0, len(indices), batch_size), desc="Evaluating batches"):
         batch_indices = indices[batch_start:batch_start + batch_size]
@@ -248,6 +273,8 @@ def evaluate(args):
                 if dist_km <= thr:
                     correct[thr] += 1
 
+        save_results("partial")
+
     # ── Print results ─────────────────────────────────────────────────────────
     print(f"\nResults on YFCC4K ({total} images, indices {start}–{start+total-1})")
     print(f"{'Threshold':>12}  {'Accuracy':>10}")
@@ -259,17 +286,7 @@ def evaluate(args):
         print(f"{label:>14}  {acc:>9.2f}%")
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w") as f:
-        json.dump({
-            "summary": {str(k): round(100 * v / total, 2) if total else 0
-                        for k, v in correct.items()},
-            "total": total,
-            "start": start,
-            "records": records,
-        }, f, indent=2)
-    print(f"\nSaved to {out}")
+    save_results("complete")
 
 
 if __name__ == "__main__":
