@@ -138,6 +138,8 @@ def analyze(records: list[dict]) -> dict:
     country_stable = sum(1 for r in country_stable_known if r.get("country_stable"))
     city_backtrack = sum(1 for r in records if r.get("city_backtrack_conflicts"))
     street_backtrack = sum(1 for r in records if r.get("street_backtrack_conflicts"))
+    city_soft_conflict = sum(1 for r in records if r.get("city_soft_conflicts"))
+    street_soft_conflict = sum(1 for r in records if r.get("street_soft_conflicts"))
     descent_blocked = [r for r in records if r.get("country_descent_blocked_reason")]
     descent_block_reasons = Counter(
         r.get("country_descent_blocked_reason") for r in descent_blocked
@@ -212,6 +214,10 @@ def analyze(records: list[dict]) -> dict:
         "backtrack_conflict_rate": {
             "city": round(100.0 * city_backtrack / total, 2) if total else 0.0,
             "street": round(100.0 * street_backtrack / total, 2) if total else 0.0,
+        },
+        "soft_conflict_rate": {
+            "city": round(100.0 * city_soft_conflict / total, 2) if total else 0.0,
+            "street": round(100.0 * street_soft_conflict / total, 2) if total else 0.0,
         },
         "country_descent_blocked_rate": round(100.0 * len(descent_blocked) / total, 2) if total else 0.0,
         "country_descent_blocked_reasons": dict(descent_block_reasons),
@@ -296,6 +302,12 @@ def _print_report(report: dict) -> None:
         "Backtrack conflict rate: "
         f"city={backtrack['city']:.2f}% street={backtrack['street']:.2f}%"
     )
+    soft_conflict = report.get("soft_conflict_rate", {})
+    if soft_conflict:
+        print(
+            "Soft conflict rate: "
+            f"city={soft_conflict['city']:.2f}% street={soft_conflict['street']:.2f}%"
+        )
     print(f"Country descent blocked rate: {report['country_descent_blocked_rate']:.2f}%")
     if report["country_descent_blocked_reasons"]:
         print("Country descent blocked reasons")
