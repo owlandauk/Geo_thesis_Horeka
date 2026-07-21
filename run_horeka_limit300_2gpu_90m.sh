@@ -1,11 +1,11 @@
 #!/bin/bash
 # Submit with:
-#   sbatch run_horeka_limit1000_2gpu_3h.sh
+#   sbatch run_horeka_limit300_2gpu_90m.sh
 #
-# This HoreKa job runs the 1000-image YFCC4K evaluation on 2 A100 GPUs for up to
-# 3 hours and prints the wall-clock runtime at the end of the Slurm log.
+# This HoreKa job runs the 300-image hierarchical-control YFCC4K evaluation on 2 A100 GPUs for up to
+# 90 minutes and prints the wall-clock runtime at the end of the Slurm log.
 
-#SBATCH --job-name=geo-1000-2gpu
+#SBATCH --job-name=geo-300-2gpu
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-p0025551
 #SBATCH --constraint=LSDF
@@ -15,9 +15,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:2
 #SBATCH --mem=100G
-#SBATCH --time=03:00:00
-#SBATCH --output=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_limit1000_2gpu_%j.out
-#SBATCH --error=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_limit1000_2gpu_%j.err
+#SBATCH --time=01:30:00
+#SBATCH --output=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_limit300_2gpu_%j.out
+#SBATCH --error=/hkfs/work/workspace/scratch/tj3409-SichengZuo/Multi-agent-MLLM-geolocation/geo_pipeline/results/horeka_limit300_2gpu_%j.err
 
 set -euo pipefail
 
@@ -91,8 +91,8 @@ nvidia-smi
 
 python geo_pipeline/evaluate.py \
   --batch_size 8 \
-  --limit 1000 \
-  --out geo_pipeline/results/horeka_v10_delta_limit1000_2gpu.json
+  --limit 300 \
+  --out geo_pipeline/results/horeka_v11_controls_limit300_2gpu.json
 
 python geo_pipeline/analyze_results.py \
-  --pred geo_pipeline/results/horeka_v10_delta_limit1000_2gpu.json
+  --pred geo_pipeline/results/horeka_v11_controls_limit300_2gpu.json
