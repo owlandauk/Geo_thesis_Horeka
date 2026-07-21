@@ -28,7 +28,7 @@ STABLE_ENTROPY_THR   = 0.98
 GUARDED_DESCENT_THR  = 0.40
 COUNTRY_REPLACE_TOP_THR    = 0.45
 COUNTRY_REPLACE_MARGIN_THR = 0.02
-COUNTRY_REPLACE_ATTEMPTS = 0
+COUNTRY_REPLACE_ATTEMPTS = 1
 
 # Optional GeoBayes-style web evidence enhancement. Disabled by default because
 # HPC compute nodes may not have outbound network access and web search can be slow.

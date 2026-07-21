@@ -179,7 +179,14 @@ def _allow_guarded_descent(posterior: dict[str, float]) -> bool:
 
 
 def _descent_block_reason(posterior: dict[str, float]) -> str | None:
-    return None
+    """Return why child-level descent should be blocked, or None if allowed."""
+    if _stable_for_descent(posterior) or _allow_guarded_descent(posterior):
+        return None
+    stats = _posterior_stats(posterior)
+    return (
+        "weak_country_posterior:"
+        f"top={stats['top']:.2f},margin={stats['margin']:.2f},entropy={stats['entropy']:.2f}"
+    )
 
 
 def _should_replace_country(posterior: dict[str, float]) -> bool:
@@ -242,10 +249,10 @@ def _web_enhance_context(posterior: dict[str, float], query: str, evidence: str)
 
 
 def _country_candidate_set(country_posterior: dict[str, float], k: int = 3) -> set[str]:
-    return {
-        country
-        for country, _ in sorted((country_posterior or {}).items(), key=lambda x: -x[1])[:k]
-    }
+    candidates = set()
+    for country, _ in sorted((country_posterior or {}).items(), key=lambda x: -x[1])[:k]:
+        candidates.add(canonicalize_country(country) or country)
+    return candidates
 
 
 def _child_country_conflict(location: str, country_posterior: dict[str, float]) -> bool:
@@ -505,6 +512,13 @@ class GeoPipeline:
                     result["country_web_delta"] = web_delta
                     result[f"{level}_raw_response"] = raw_resp
 
+            if level != "country":
+                posterior, conflicts = _filter_child_posterior(
+                    posterior, result.get("country_posterior", {})
+                )
+                if conflicts:
+                    result[f"{level}_backtrack_conflicts"] = conflicts
+
             best = max(posterior, key=posterior.get)
             result[level] = best
             result[f"{level}_posterior"] = posterior
@@ -707,6 +721,15 @@ class GeoPipeline:
                     results[idx]["country_web_enhanced"] = True
                     results[idx]["country_web_search_query"] = web_query
                     results[idx]["country_web_delta"] = web_delta
+
+            if level != "country":
+                for idx in level_indices:
+                    filtered, conflicts = _filter_child_posterior(
+                        posteriors_by_idx[idx], results[idx].get("country_posterior", {})
+                    )
+                    posteriors_by_idx[idx] = filtered
+                    if conflicts:
+                        results[idx][f"{level}_backtrack_conflicts"] = conflicts
 
             # ── Collect level results ───────────────────────────────────────────
             for i in level_indices:
