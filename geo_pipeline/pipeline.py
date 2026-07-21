@@ -179,11 +179,6 @@ def _allow_guarded_descent(posterior: dict[str, float]) -> bool:
 
 
 def _descent_block_reason(posterior: dict[str, float]) -> str | None:
-    stats = _posterior_stats(posterior)
-    if stats["top"] < 0.3:
-        return "very_low_country_confidence"
-    if stats["top"] < GUARDED_DESCENT_THR:
-        return "weak_country_top_mass"
     return None
 
 
@@ -289,10 +284,8 @@ def _replace_context(level: str, posterior: dict[str, float], key_evidence: list
         "Previous country candidates remained unstable after verification. "
         f"Top candidates were {_format_top_candidates(posterior, 5)}; "
         f"top={stats['top']:.2f}, margin={stats['margin']:.2f}, entropy={stats['entropy']:.2f}. "
-        "Re-analyze from scratch and return a diverse country candidate set across continents when ambiguous. "
-        "Do not infer United States or Canada from English text, generic roads, suburban houses, vegetation, "
-        "or product branding alone. When evidence is weak, keep non-North-American alternatives plausible. "
-        "United States, Canada, and Mexico remain valid when concrete local evidence supports them. "
+        "Re-analyze from scratch and use confidence to reflect the visual evidence. "
+        "Keep alternatives only when the image is ambiguous. "
         f"Previous useful clues: {clues}"
     )
 
@@ -300,24 +293,11 @@ def _replace_context(level: str, posterior: dict[str, float], key_evidence: list
 def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str:
     clues = "; ".join(key_evidence[-3:])
     if level == "city":
-        countries = _format_top_candidates(result.get("country_posterior", {}))
-        return (
-            f"Country candidates: {countries}. "
-            "Hypothesize cities within these candidate countries. Do not introduce a city or region "
-            "from a different country unless visible text, an address, or a landmark directly names it. "
-            "If the country remains ambiguous, keep alternatives within the listed candidates. "
-            f"Key clues: {clues}"
-        )
+        parent = result.get("country", "")
+        return f"Located in {parent}. Key clues: {clues}" if parent else f"Key clues: {clues}"
     if level == "street":
-        countries = _format_top_candidates(result.get("country_posterior", {}))
-        cities = _format_top_candidates(result.get("city_posterior", {}))
-        return (
-            f"Country candidates: {countries}. City candidates: {cities}. "
-            "Refine within these city/country candidates. Return a street, district, or landmark; "
-            "do not append a different country unless directly visible in the image. If no reliable "
-            "street-level evidence exists, return Unknown instead of a famous but unsupported place. "
-            f"Key clues: {clues}"
-        )
+        parent = result.get("city") or result.get("country", "")
+        return f"Located in {parent}. Key clues: {clues}" if parent else f"Key clues: {clues}"
     return ""
 
 
@@ -336,15 +316,8 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                 {"type": "image", "image": image},
                 {"type": "text", "text": (
                     f"You are a geolocation expert. {level_hint}\n"
-                    "Return 3-5 plausible hypotheses when the image is ambiguous. "
                     "For country-level reasoning, return country names only, not continents or regions. "
-                    "For country-level reasoning, if evidence is weak or generic, keep candidates spread across "
-                    "plausible continents instead of clustering around one default region. Do not default to any "
-                    "country from weak generic cues. English text, generic roads, suburban houses, vegetation, "
-                    "mountains, beaches, architecture, online media, or product branding alone are not enough to "
-                    "infer United States or Canada. When evidence is weak, keep non-North-American alternatives "
-                    "plausible. United States, Canada, and Mexico remain valid when concrete local evidence supports them. "
-                    "Assign high confidence only when there are explicit local clues. "
+                    "Use confidence to reflect the visual evidence; keep alternatives only when the image is ambiguous. "
                     + (f"Prior context: {context}\n" if context else "")
                     + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
                     '{\n'
@@ -531,14 +504,6 @@ class GeoPipeline:
                     result["country_web_search_query"] = web_query
                     result["country_web_delta"] = web_delta
                     result[f"{level}_raw_response"] = raw_resp
-
-            if level in ("city", "street"):
-                filtered, conflicts = _filter_child_posterior(
-                    posterior, result.get("country_posterior", {})
-                )
-                if conflicts:
-                    result[f"{level}_backtrack_conflicts"] = conflicts[:5]
-                    posterior = filtered
 
             best = max(posterior, key=posterior.get)
             result[level] = best
@@ -747,14 +712,6 @@ class GeoPipeline:
             for i in level_indices:
                 posterior = posteriors_by_idx[i]
                 results[i][f"{level}_raw_response"] = raw_by_idx[i]
-
-                if level in ("city", "street"):
-                    filtered, conflicts = _filter_child_posterior(
-                        posterior, results[i].get("country_posterior", {})
-                    )
-                    if conflicts:
-                        results[i][f"{level}_backtrack_conflicts"] = conflicts[:5]
-                        posterior = filtered
 
                 best = max(posterior, key=posterior.get)
                 results[i][level] = best

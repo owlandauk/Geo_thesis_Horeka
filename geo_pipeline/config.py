@@ -17,7 +17,7 @@ TRANSITION_THR  = 0.55   # τ_transition (lowered from 0.7: coarse levels rarely
 ENHANCE_THR     = 0.05   # τ_enhance  (ΔP threshold)
 BETA            = 0.693  # ln2
 
-# ── Hierarchical control (v9) ─────────────────────────────────────────────────
+# ── Hierarchical diagnostics/control ──────────────────────────────────────────
 # A level is considered stable for descent when either the top posterior is
 # strong, or it clears the transition threshold with enough top1-top2 margin / low
 # normalized entropy. This prevents flat country posteriors from blindly driving
@@ -28,7 +28,7 @@ STABLE_ENTROPY_THR   = 0.98
 GUARDED_DESCENT_THR  = 0.40
 COUNTRY_REPLACE_TOP_THR    = 0.45
 COUNTRY_REPLACE_MARGIN_THR = 0.02
-COUNTRY_REPLACE_ATTEMPTS = 1
+COUNTRY_REPLACE_ATTEMPTS = 0
 
 # Optional GeoBayes-style web evidence enhancement. Disabled by default because
 # HPC compute nodes may not have outbound network access and web search can be slow.
