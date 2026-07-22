@@ -92,7 +92,7 @@ nvidia-smi
 python geo_pipeline/evaluate.py \
   --batch_size 8 \
   --limit 300 \
-  --out geo_pipeline/results/horeka_v11_controls_limit300_2gpu.json
+  --out geo_pipeline/results/horeka_v13_country_bias_limit300_2gpu.json
 
 python geo_pipeline/analyze_results.py \
-  --pred geo_pipeline/results/horeka_v11_controls_limit300_2gpu.json
+  --pred geo_pipeline/results/horeka_v13_country_bias_limit300_2gpu.json

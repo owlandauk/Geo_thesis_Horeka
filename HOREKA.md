@@ -156,14 +156,14 @@ These scripts can be submitted from the repository root. They also `cd` to the r
 
 ### Hierarchical-Control Validation
 
-After changing result-control logic, run the 300-image pair first:
+After changing country-bias or result-control logic, run the 300-image pair first:
 
 ```bash
 sbatch run_horeka_limit300_2gpu_90m.sh
 sbatch run_horeka_limit300_strict_2gpu_90m.sh
 ```
 
-Compare the two `analyze_results.py` reports on `Continent <2500km`,
+Compare `results/horeka_v13_country_bias_limit300_2gpu.json` and the strict counterpart with `analyze_results.py` on `Continent <2500km`,
 `Country <750km`, `Country-child conflict rate`, `Backtrack conflict rate`,
 `Country replace rate`, `Country descent blocked rate`, and `North America false
 positives`. Keep the default geocoding path unless the strict ablation improves
