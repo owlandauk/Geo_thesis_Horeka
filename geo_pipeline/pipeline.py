@@ -294,14 +294,44 @@ def _context_for_level(level: str, result: dict, key_evidence: list[str]) -> str
     clues = "; ".join(key_evidence[-3:])
     if level == "city":
         parent = result.get("country", "")
-        return f"Located in {parent}. Key clues: {clues}" if parent else f"Key clues: {clues}"
+        if parent:
+            return (
+                f"Previous country estimate: {parent}. Treat it as a weak prior, "
+                "not a hard constraint; include another country/city if visual evidence supports it. "
+                f"Key clues: {clues}"
+            )
+        return f"Key clues: {clues}"
     if level == "street":
-        parent = result.get("city") or result.get("country", "")
-        return f"Located in {parent}. Key clues: {clues}" if parent else f"Key clues: {clues}"
+        city = result.get("city", "")
+        country = result.get("country", "")
+        parent = ", ".join(x for x in (city, country) if x)
+        if parent:
+            return (
+                f"Previous coarse estimate: {parent}. Treat it as a weak prior, "
+                "not a hard constraint; prefer the visible street/district/landmark evidence. "
+                f"Key clues: {clues}"
+            )
+        return f"Key clues: {clues}"
     return ""
 
 
 # ── Prompt builders ────────────────────────────────────────────────────────────
+
+def _country_bias_guard(level: str) -> str:
+    if level != "country":
+        return ""
+    return (
+        "Country-level calibration:\n"
+        "Do not choose United States or Canada from generic English text, wide roads, "
+        "suburban housing, vegetation, global brands, or road scenery alone; treat those "
+        "as weak transferable clues. Choose United States or Canada only when concrete "
+        "clues support them, such as US/Canada road signs, license plates, lane markings, "
+        "traffic lights, state/province names, phone/postal formats, landmarks, or "
+        "region-specific infrastructure. If North America is plausible but evidence is "
+        "generic, keep Europe/Asia/Oceania alternatives with comparable confidence instead "
+        "of making United States the clear winner.\n"
+    )
+
 
 def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> list:
     level_hint = {
@@ -318,6 +348,7 @@ def _hypothesize_prompt(image: Image.Image, level: str, context: str = "") -> li
                     f"You are a geolocation expert. {level_hint}\n"
                     "For country-level reasoning, return country names only, not continents or regions. "
                     "Use confidence to reflect the visual evidence; keep alternatives only when the image is ambiguous. "
+                    + _country_bias_guard(level)
                     + (f"Prior context: {context}\n" if context else "")
                     + "\nAnalyze this image and respond with valid JSON only, no markdown fences:\n"
                     '{\n'
@@ -334,6 +365,12 @@ def _verify_prompt(image: Image.Image, task: dict, hypotheses: list[str], level:
     hyp_str = ", ".join(hypotheses[:5])
     bbox = task.get("bbox")
     region_note = f" Focus on region [x,y,w,h]={bbox}." if bbox else ""
+    country_note = (
+        "For country-level evidence, distinguish concrete North America clues from generic transferable clues. "
+        "Do not treat generic English text, wide roads, suburbs, vegetation, or global brands as strong support for United States or Canada. "
+        "Mention explicitly when US/Canada support is weak or absent.\n"
+        if level == "country" else ""
+    )
     return [
         {
             "role": "user",
@@ -343,7 +380,8 @@ def _verify_prompt(image: Image.Image, task: dict, hypotheses: list[str], level:
                     f"Task: {task['desc']}.{region_note}\n"
                     f"Current hypotheses: {hyp_str}\n"
                     f"Reasoning level: {level}\n\n"
-                    "Describe what you observe and how it relates to the hypotheses.\n"
+                    + country_note
+                    + "Describe what you observe and how it relates to the hypotheses.\n"
                     "Respond with: <observation text>"
                 )},
             ],
