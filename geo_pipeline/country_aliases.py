@@ -2,7 +2,7 @@
 Country name → continent map + canonicalization helpers.
 
 Shared between pipeline.py (used to normalize raw MLLM country labels before
-they enter _softmax_prior — see full_v4.json diagnosis: 60% of records got
+they enter _softmax_prior — earlier full-run diagnosis showed many records got
 Unknown because the model emitted "USA"/"California, USA"/"Southeast Asia"
 that no downstream step recognized) and evaluate.py (used for the
 continent-centroid geocode fallback and, as of full_v5, for extracting

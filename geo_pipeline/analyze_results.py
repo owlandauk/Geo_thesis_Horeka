@@ -1,7 +1,7 @@
 """Offline diagnostics for geo_pipeline result JSON files.
 
 Usage:
-  python3 geo_pipeline/analyze_results.py --pred geo_pipeline/results/full_v5.json
+  python3 geo_pipeline/analyze_results.py --pred geo_pipeline/results/horeka_latest_limit300_2gpu.json
 """
 
 from __future__ import annotations

@@ -37,10 +37,10 @@ MLLM_BACKEND=vllm MODEL_PATH=/path/to/qwen2.5-vl-7b \
 python3 geo_pipeline/evaluate.py --batch_size 20 --out geo_pipeline/results/run.json
 ```
 
-Check the GPU wait script syntax before server use:
+Check the HoreKa Slurm script syntax before server use:
 
 ```bash
-bash -n geo_pipeline/wait_and_run.sh
+bash -n run_horeka_latest_2gpu.sh
 ```
 
 ## Coding Style & Naming Conventions

@@ -37,7 +37,9 @@ Im2GPS3K runs.
 
 ### YFCC4K Baseline
 
-Use `geo_pipeline/results/full_v5.json` as the baseline result.
+The committed repository no longer stores bulky result JSON files. Keep baseline
+JSON outputs on HoreKa under `geo_pipeline/results/` and copy only the metrics
+needed for thesis notes.
 
 ```text
 Street <1km:        5.34%
@@ -50,8 +52,8 @@ Unknown country:    0.88%
 
 ### Im2GPS3K Baseline
 
-Use `geo_pipeline/results/horeka_v5_im2gps3ktest_full_4gpu.json` as the
-current project baseline on Im2GPS3K test.
+The current Im2GPS3K baseline result should also stay as a HoreKa artifact, not
+as a committed JSON file.
 
 ```text
 Images:             2997 (indices 0-2996)
@@ -92,19 +94,19 @@ python geo_pipeline/evaluate.py \
   --start 0 \
   --limit 200 \
   --batch_size 20 \
-  --out geo_pipeline/results/v7_limit200_default.json
+  --out geo_pipeline/results/horeka_manual_limit200.json
 ```
 
 Analyze:
 
 ```bash
-python geo_pipeline/analyze_results.py --pred geo_pipeline/results/v7_limit200_default.json
+python geo_pipeline/analyze_results.py --pred geo_pipeline/results/horeka_manual_limit200.json
 ```
 
 If already inside `geo_pipeline/`, use:
 
 ```bash
-python analyze_results.py --pred results/v7_limit200_default.json
+python analyze_results.py --pred results/horeka_manual_limit200.json
 ```
 
 Do not use `--strict_child_geocode` for baseline-comparable runs; it is only for ablation.
@@ -137,34 +139,44 @@ export XDG_CACHE_HOME="${JOB_TMP_DIR}/xdg"
 mkdir -p "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}" "${XDG_CACHE_HOME}"
 ```
 
-The repository Slurm scripts already include these exports.
+The repository Slurm script already includes these exports.
 
-## Slurm Scripts
+## Slurm Script
 
-Existing scripts in the repository root:
+Use the unified HoreKa script in the repository root:
 
 ```bash
-sbatch run_horeka_limit50_1gpu_30m.sh
-sbatch run_horeka_limit300_2gpu_90m.sh
-sbatch run_horeka_limit300_strict_2gpu_90m.sh
-sbatch run_horeka_limit1000_2gpu_3h.sh
-sbatch run_horeka_full_2gpu_8h.sh
-sbatch run_horeka_full_4gpu_6h.sh
+sbatch run_horeka_latest_2gpu.sh
 ```
 
-These scripts can be submitted from the repository root. They also `cd` to the repository root before running Python, and Slurm logs are written to the absolute `geo_pipeline/results` directory on HoreKa.
+By default this runs 300 YFCC4K images on 2 A100 GPUs and writes
+`geo_pipeline/results/horeka_latest_limit300_2gpu.json`. The script prints the
+Git branch and commit in the Slurm log so results can be tied back to the exact
+code.
+
+For a quick smoke test:
+
+```bash
+sbatch --export=ALL,LIMIT=50,BATCH_SIZE=4,RUN_TAG=smoke run_horeka_latest_2gpu.sh
+```
+
+For a full run:
+
+```bash
+sbatch --export=ALL,LIMIT=full,RUN_TAG=full run_horeka_latest_2gpu.sh
+```
 
 ### Hierarchical-Control Validation
 
-After changing country-bias or result-control logic, run the 300-image pair first:
+After changing country-bias or result-control logic, run the default 300-image
+job first:
 
 ```bash
-sbatch run_horeka_limit300_2gpu_90m.sh
-sbatch run_horeka_limit300_strict_2gpu_90m.sh
+sbatch run_horeka_latest_2gpu.sh
 ```
 
-Compare `results/horeka_v13_country_bias_limit300_2gpu.json` and the strict counterpart with `analyze_results.py` on `Continent <2500km`,
-`Country <750km`, `Country-child conflict rate`, `Backtrack conflict rate`,
-`Country replace rate`, `Country descent blocked rate`, and `North America false
-positives`. Keep the default geocoding path unless the strict ablation improves
-coarse metrics without a large city/region regression.
+Check `Continent <2500km`, `Country <750km`, `Country-child conflict rate`,
+`Backtrack conflict rate`, `Country replace rate`, `Country descent blocked
+rate`, and `North America false positives`. Keep the default geocoding path
+unless a strict ablation improves coarse metrics without a large city/region
+regression.
